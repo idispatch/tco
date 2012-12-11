@@ -1,4 +1,5 @@
 #include "stdlib.h"
+#include "errno.h"
 #include "string.h"
 #include "stdbool.h"
 #include <png.h>
@@ -10,6 +11,8 @@
 #include "tco.h"
 
 #define MAX_TCO_CONTROLS 8
+
+#define DEBUGLOG(message, ...) fprintf(stderr, "%s@%d: " message "\n", __FILE__, __LINE__, ##__VA_ARGS__);
 
 /* Callback types */
 typedef int (*HandleKeyFunc)(int sym, int mod, int scancode, unsigned short unicode, int event);
@@ -175,26 +178,20 @@ static bool tco_window_set_parent(tco_window_t window,
 
         rc = screen_get_window_property_cv(parent, SCREEN_PROPERTY_GROUP, 256, buffer);
         if (rc) {
-#ifdef _DEBUG
-            perror("screen_get_window_property_cv(SCREEN_PROPERTY_GROUP)");
-#endif
+            DEBUGLOG("%s (%d)", strerror(errno), rc);
             return false;
         }
 
         rc = screen_join_window_group(window->m_window, buffer);
         if (rc) {
-#ifdef _DEBUG
-            perror("screen_join_window_group");
-#endif
+            DEBUGLOG("%s (%d)", strerror(errno), rc);
             return false;
         }
         window->m_parent = parent;
     } else if (window->m_parent) {
         rc = screen_leave_window_group(window->m_window);
         if (rc) {
-#ifdef _DEBUG
-            perror("screen_leave_window_group");
-#endif
+            DEBUGLOG("%s (%d)", strerror(errno), rc);
             return false;
         }
         window->m_parent = 0;
@@ -223,9 +220,7 @@ static void tco_window_init(tco_window_t window,
                                     window->m_context,
                                     SCREEN_CHILD_WINDOW);
     if (rc) {
-#ifdef _DEBUG
-        perror("screen_create_window");
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return;
     }
 
@@ -233,9 +228,7 @@ static void tco_window_init(tco_window_t window,
                                        SCREEN_PROPERTY_FORMAT,
                                        &format);
     if (rc) {
-#ifdef _DEBUG
-        perror("screen_set_window_property_iv(SCREEN_PROPERTY_FORMAT)");
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         screen_destroy_window(window->m_window);
         window->m_window = 0;
         return;
@@ -245,9 +238,7 @@ static void tco_window_init(tco_window_t window,
                                        SCREEN_PROPERTY_USAGE,
                                        &usage);
     if (rc) {
-#ifdef _DEBUG
-        perror("screen_set_window_property_iv(SCREEN_PROPERTY_USAGE)");
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         screen_destroy_window(window->m_window);
         window->m_window = 0;
         return;
@@ -258,9 +249,7 @@ static void tco_window_init(tco_window_t window,
                                            SCREEN_PROPERTY_SIZE,
                                            temp);
         if (rc) {
-#ifdef _DEBUG
-            perror("screen_set_window_property_iv(SCREEN_PROPERTY_SIZE)");
-#endif
+            DEBUGLOG("%s (%d)", strerror(errno), rc);
             screen_destroy_window(window->m_window);
             window->m_window = 0;
             return;
@@ -270,9 +259,7 @@ static void tco_window_init(tco_window_t window,
                                            SCREEN_PROPERTY_SIZE,
                                            temp);
         if (rc) {
-#ifdef _DEBUG
-            perror("screen_set_window_property_iv(SCREEN_PROPERTY_SIZE)");
-#endif
+            DEBUGLOG("%s (%d)", strerror(errno), rc);
             screen_destroy_window(window->m_window);
             window->m_window = 0;
             return;
@@ -282,9 +269,7 @@ static void tco_window_init(tco_window_t window,
                                            SCREEN_PROPERTY_POSITION,
                                            temp);
         if (rc) {
-#ifdef _DEBUG
-            perror("screen_get_window_property_iv(SCREEN_PROPERTY_POSITION)");
-#endif
+            DEBUGLOG("%s (%d)", strerror(errno), rc);
             screen_destroy_window(window->m_window);
             window->m_window = 0;
             return;
@@ -294,9 +279,7 @@ static void tco_window_init(tco_window_t window,
                                            SCREEN_PROPERTY_POSITION,
                                            temp);
         if (rc) {
-#ifdef _DEBUG
-            perror("screen_set_window_property_iv(SCREEN_PROPERTY_POSITION)");
-#endif
+            DEBUGLOG("%s (%d)", strerror(errno), rc);
             screen_destroy_window(window->m_window);
             window->m_window = 0;
             return;
@@ -306,9 +289,7 @@ static void tco_window_init(tco_window_t window,
                                            SCREEN_PROPERTY_SIZE,
                                            window->m_size);
         if (rc) {
-#ifdef _DEBUG
-            perror("screen_set_window_property_iv(SCREEN_PROPERTY_SIZE)");
-#endif
+            DEBUGLOG("%s (%d)", strerror(errno), rc);
             screen_destroy_window(window->m_window);
             window->m_window = 0;
             return;
@@ -319,9 +300,7 @@ static void tco_window_init(tco_window_t window,
                                        SCREEN_PROPERTY_BUFFER_SIZE,
                                        window->m_size);
     if (rc) {
-#ifdef _DEBUG
-        perror("screen_set_window_property_iv(SCREEN_PROPERTY_BUFFER_SIZE)");
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         screen_destroy_window(window->m_window);
         window->m_window = 0;
         return;
@@ -329,9 +308,7 @@ static void tco_window_init(tco_window_t window,
 
     rc = screen_create_window_buffers(window->m_window, 2);
     if (rc) {
-#ifdef _DEBUG
-        perror("screen_create_window_buffers");
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         screen_destroy_window(window->m_window);
         window->m_window = 0;
         return;
@@ -353,9 +330,7 @@ static bool tco_window_set_z_order(tco_window_t window,
                                            SCREEN_PROPERTY_ZORDER,
                                            &zOrder);
     if (rc) {
-#ifdef _DEBUG
-        fprintf(stderr, "Cannot set z-order: %s", strerror(errno));
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return false;
     }
     return true;
@@ -370,9 +345,7 @@ static bool tco_window_set_touch_sensitivity(tco_window_t window,
                                            SCREEN_PROPERTY_SENSITIVITY,
                                            &sensitivity);
     if (rc) {
-#ifdef _DEBUG
-        fprintf(stderr, "Cannot set screen sensitivity: %s", strerror(errno));
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return false;
     }
     return true;
@@ -475,11 +448,9 @@ static void tco_label_window_show_at(tco_label_window_t window,
     rc = screen_set_window_property_iv(window->m_baseWindow.m_window,
                                        SCREEN_PROPERTY_VISIBLE,
                                        &visible);
-#ifdef _DEBUG
     if (rc) {
-        perror("set label window visible: ");
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
     }
-#endif
 }
 
 static void tco_label_window_move(tco_label_window_t window,
@@ -492,12 +463,10 @@ static void tco_label_window_move(tco_label_window_t window,
     int rc = screen_set_window_property_iv(window->m_baseWindow.m_window,
                                            SCREEN_PROPERTY_POSITION,
                                            position);
-#ifdef _DEBUG
     if (rc) {
-        perror("screen_set_window_property_iv");
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return;
     }
-#endif
 }
 
 static void tco_label_window_draw(tco_label_window_t label_window,
@@ -727,9 +696,7 @@ static void tco_control_fill(tco_control_t control) {
     int rc = screen_create_pixmap(&control->m_pixmap,
                                   control->m_context);
     if (rc) {
-#ifdef _DEBUG
-        fprintf(stderr, "screen_create_pixmap: %s", strerror(errno));
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return;
     }
 
@@ -737,9 +704,7 @@ static void tco_control_fill(tco_control_t control) {
                                        SCREEN_PROPERTY_FORMAT,
                                        &format);
     if (rc) {
-#ifdef _DEBUG
-        fprintf(stderr, "screen_set_pixmap_property_iv: %s", strerror(errno));
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return;
     }
 
@@ -747,26 +712,20 @@ static void tco_control_fill(tco_control_t control) {
                                        SCREEN_PROPERTY_BUFFER_SIZE,
                                        size);
     if (rc) {
-#ifdef _DEBUG
-        fprintf(stderr, "screen_set_pixmap_property_iv: %s", strerror(errno));
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return;
     }
 
     rc = screen_create_pixmap_buffer(control->m_pixmap);
     if (rc) {
-#ifdef _DEBUG
-        fprintf(stderr, "screen_create_pixmap_buffer: %s", strerror(errno));
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return;
     }
     rc = screen_get_pixmap_property_pv(control->m_pixmap,
                                        SCREEN_PROPERTY_RENDER_BUFFERS,
                                        (void**)&control->m_buffer);
     if (rc) {
-#ifdef _DEBUG
-        fprintf(stderr, "screen_get_pixmap_property_pv: %s", strerror(errno));
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return;
     }
 
@@ -776,9 +735,7 @@ static void tco_control_fill(tco_control_t control) {
     };
     rc = screen_fill(control->m_context, control->m_buffer, attribs);
     if (rc) {
-#ifdef _DEBUG
-        fprintf(stderr, "screen_fill: %s", strerror(errno));
-#endif
+        DEBUGLOG("%s (%d)", strerror(errno), rc);
         return;
     }
     controlNum++;
@@ -1022,7 +979,7 @@ static int tco_context_load_controls(tco_context_t ctx,
         root = cJSON_Parse(s);
         if (!root)
         {
-            printf("Could not parse JSON from string\n");
+	        DEBUGLOG("Could not parse JSON from string");
             break;
         }
 
@@ -1030,7 +987,7 @@ static int tco_context_load_controls(tco_context_t ctx,
         version = tco_json_get_int(root, "version");
         if (version != TCO_FILE_VERSION)
         {
-            printf("Invalid file version: %d\n", version);
+            DEBUGLOG("Invalid file version: %d", version);
             break;
         }
 
@@ -1108,13 +1065,13 @@ static int tco_context_load_controls(tco_context_t ctx,
                 }
                 else
                 {
-                    printf("Invalid control description\n");
+                    DEBUGLOG("Invalid control description");
                     break;
                 }
             }
         } else
         {
-            printf("Invalid file contents\n");
+            DEBUGLOG("Invalid file contents");
             break;
         }
 
@@ -1137,7 +1094,7 @@ static int tco_context_load_controls(tco_context_t ctx,
     }
 
     if (!s) {
-        printf("Failed to read JSON file\n");
+        DEBUGLOG("Failed to read JSON file");
     }
     free(s);
     return retCode;

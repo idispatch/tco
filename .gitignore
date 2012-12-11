@@ -1,0 +1,4 @@
+*.pinfo
+*.o
+.DS_Store
+
