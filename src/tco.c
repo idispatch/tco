@@ -586,13 +586,13 @@ static bool tco_window_init_ex(tco_window_t window,
     if(!window) {
         return false;
     }
+    memset(window, 0, sizeof(struct tco_window));
     window->m_context = context;
 
     int rc;
     int format = SCREEN_FORMAT_RGBA8888;
     int usage = SCREEN_USAGE_NATIVE | SCREEN_USAGE_READ | SCREEN_USAGE_WRITE;
 
-    memset(window, 0, sizeof(struct tco_window));
     window->m_size[0] = width;
     window->m_size[1] = height;
     window->m_alpha = alpha;
