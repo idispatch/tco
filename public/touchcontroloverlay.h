@@ -83,7 +83,15 @@ int tco_initialize(tco_context_t *context, screen_context_t screenContext, struc
 /**
  * Load the controls from a file.
  */
-int tco_loadcontrols(tco_context_t context, const char* filename);
+int tco_loadcontrols(tco_context_t context,
+                     const char* default_filename,
+                     const char* user_filename);
+
+/**
+ * Saves the controls to a file.
+ */
+int tco_savecontrols(tco_context_t context,
+                     const char* user_filename);
 
 /**
  * Load default controls as a fallback.

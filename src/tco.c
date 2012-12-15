@@ -7,12 +7,16 @@
 #include <bps/screen.h>
 #include <bps/event.h>
 #include <bps/navigator.h>
-#include "cJSON.h"
-#include "tco.h"
+#include "touchcontroloverlay.h"
+#include <queue.h>
+#include <math.h>
+#include <cJSON.h>
 
+/* Maximum number of defined controls */
 #define MAX_TCO_CONTROLS 8
 
-#define DEBUGLOG(message, ...) fprintf(stderr, "%s@%d: " message "\n", __FILE__, __LINE__, ##__VA_ARGS__);
+/* Logging */
+#define DEBUGLOG(message, ...) fprintf(stderr, "%s(%s@%d): " message "\n", __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__);
 
 /* Callback types */
 typedef int (*HandleKeyFunc)(int sym, int mod, int scancode, unsigned short unicode, int event);
@@ -40,26 +44,34 @@ typedef struct tco_label_window * tco_label_window_t;
 typedef struct tco_configuration_window * tco_configuration_window_t;
 typedef struct tco_label * tco_label_t;
 typedef struct tco_control * tco_control_t;
+typedef struct png_reader * png_reader_t;
+typedef struct touch_owner * touch_owner_t;
+
+struct touch_owner {
+    tco_control_t control;
+    int touch_id;
+    SLIST_ENTRY(touch_owner) link;
+};
 
 /* TCO window */
 struct tco_window {
     screen_context_t m_context;
     screen_window_t m_window;
     screen_window_t m_parent;
-    int m_size[2];
-    int m_alpha;
+    int m_size[2]; /* width, height */
+    int m_alpha; /* 0..255 */
 };
 
 /* TCO label window */
 struct tco_label_window {
-    struct tco_window m_baseWindow; /* Must be first member */
-    int m_offset[2];
-    float m_scale[2];
+    struct tco_window m_baseWindow;
+    int m_offset[2]; /* x, y */
+    float m_scale[2]; /* x, y */
 };
 
 /* TCO configuration window */
 struct tco_configuration_window {
-    struct tco_window m_baseWindow; /* Must be first member */
+    struct tco_window m_baseWindow;
     tco_control_t m_selected;
 };
 
@@ -69,58 +81,72 @@ struct tco_label {
     int m_y;
     int m_width;
     int m_height;
+    char * m_image_file;
     tco_control_t m_control;
     tco_label_window_t m_window;
 };
 
 /* TCO control */
 struct tco_control {
+    /* Control type */
     tco_control_type m_type;
 
+    /* Control id */
     int m_id;
 
     int m_x;
     int m_y;
     int m_width;
     int m_height;
+
+    /* Control image properties */
     int m_srcWidth;
     int m_srcHeight;
 
-    //EventDispatcher *m_dispatcher;
-    //EventDispatcher *m_tapDispatcher;
+    /* Control image */
+    char * m_image_file;
 
     screen_context_t m_context;
+
+    /* Control image data */
     screen_pixmap_t m_pixmap;
     screen_buffer_t m_buffer;
 
-    int m_contactId;
+    int m_touchId;
 
-    /* For touch areas */
-    int m_lastPos[2];
-    long long m_touchDownTime;
+    union {
+        struct {
+            int m_last_x;
+            int m_last_y;
+            long long m_touchDownTime;
+        } touch_area; /* For touch areas */
+        struct {
+            int m_start_x;
+            int m_start_y;
+            long long m_touchScreenStartTime;
+            bool m_touchScreenInMoveEvent;
+            bool m_touchScreenInHoldEvent;
+        } touch_screen; /* For touch screen */
+    } m_state;
 
-    /* For touch screens */
-    int m_startPos[2];
-    long long m_touchScreenStartTime;
-    bool m_touchScreenInMoveEvent;
-    bool m_touchScreenInHoldEvent;
-
+    /* Control label */
     tco_label_t m_label;
 
+    /* Control specific properties */
     union {
         struct {
             int m_symbol;
             int m_modifier;
             int m_scancode;
             int m_unicode;
-        } key;
+        } key; /* KEY properties */
         struct {
             int m_mask;
             int m_button;
-        } mouse;
+        } mouse; /* MOUSEBUTTON properties */
         struct {
             int m_tapSensitive;
-        } touch;
+        } touch; /* TOUCHAREA properties */
 
     } m_properties;
 };
@@ -128,13 +154,18 @@ struct tco_control {
 /* TCO context */
 struct tco_context {
     screen_context_t m_screenContext;
-    screen_window_t m_appWindow;
     tco_configuration_window_t m_configWindow;
 
+    /* Defined controls */
     tco_control_t * m_controls;
     int m_numControls;
-    //std::map<int, Control *> m_controlMap;
 
+    SLIST_HEAD(touch_owners, touch_owner) m_touch_owners;
+
+    /* Where to save user control settings*/
+    char * user_control_path;
+
+    /* Callbacks */
     HandleKeyFunc m_handleKeyFunc;
     HandleDPadFunc m_handleDPadFunc;
     HandleTouchFunc m_handleTouchFunc;
@@ -143,55 +174,369 @@ struct tco_context {
     HandleTouchScreenFunc m_handleTouchScreenFunc;
 };
 
+struct png_reader {
+    screen_context_t m_context;
+    screen_pixmap_t m_pixmap;
+    screen_buffer_t m_buffer;
+
+    png_structp m_read;
+    png_infop m_info;
+    unsigned char* m_data; /* image data */
+    png_bytep* m_rows;  /* pointers to PNG lines */
+    int m_width; /* image width */
+    int m_height; /* image height */
+    int m_stride; /* image line width in buffer */
+};
+
+/* Utility functions */
+static char * tco_read_text_file(const char * fileName)
+{
+    if(!fileName || fileName[0] == 0) {
+        DEBUGLOG("No file to read");
+        return NULL;
+    }
+
+    long len;
+    char *buf = 0;
+    FILE *fp = fopen(fileName, "r");
+    while (fp)
+    {
+        if (0 != fseek(fp, 0, SEEK_END))
+        {
+            DEBUGLOG("%s (%d)", strerror(errno), errno);
+            break;
+        }
+        len = ftell(fp);
+        if (len == -1)
+        {
+            DEBUGLOG("%s (%d)", strerror(errno), errno);
+            break;
+        }
+        if (0 != fseek(fp, 0, SEEK_SET))
+        {
+            DEBUGLOG("%s (%d)", strerror(errno), errno);
+            break;
+        }
+        buf = (char *) calloc(1, len + 1);
+        if (!buf)
+        {
+            DEBUGLOG("%s (%d)", strerror(errno), errno);
+            break;
+        }
+        fread(buf, len, 1, fp);
+        if (ferror(fp))
+        {
+            DEBUGLOG("%s (%d)", strerror(errno), errno);
+            free(buf);
+            buf = 0;
+            break;
+        }
+        break;
+    }
+    if (fp)
+    {
+        fclose(fp);
+    }
+    return buf;
+}
+
+/* JSON functions */
+static int tco_json_get_int(cJSON * object, const char * name)
+{
+    cJSON * value = cJSON_GetObjectItem(object, name);
+    if (value != NULL && value->type == cJSON_Number) {
+        return value->valueint;
+    } else {
+        DEBUGLOG("Could not get int (%s) from JSON", name);
+    }
+    return 0;
+}
+
+static int tco_json_set_int(cJSON * object, const char * name, int value) {
+    cJSON * p = cJSON_CreateNumber(value);
+    if(p) {
+        cJSON_AddItemToObject(object, name, p);
+        return TCO_SUCCESS;
+    } else {
+        DEBUGLOG("Could not set int (%s) in JSON", name);
+        return TCO_FAILURE;
+    }
+}
+
+static const char * tco_json_get_str(cJSON * object, const char * name)
+{
+    cJSON * value = cJSON_GetObjectItem(object, name);
+    if (value != NULL && value->type == cJSON_String) {
+        return value->valuestring;
+    } else {
+        DEBUGLOG("Could not get str (%s) from JSON", name);
+    }
+    return 0;
+}
+
+static int tco_json_set_str(cJSON * object, const char * name, const char * value) {
+    cJSON * p = cJSON_CreateString(value);
+    if(p) {
+        cJSON_AddItemToObject(object, name, p);
+        return TCO_SUCCESS;
+    } else {
+        DEBUGLOG("Could not set str (%s) in JSON", name);
+        return TCO_FAILURE;
+    }
+}
+
+/* PNG reader functions */
+static png_reader_t tco_png_reader_alloc(screen_context_t context) {
+    png_reader_t png = (png_reader_t)calloc(1, sizeof(struct png_reader));
+    if(png) {
+        png->m_context = context;
+    }
+    return png;
+}
+
+static void tco_png_reader_free(png_reader_t png) {
+    if(png) {
+        int rc;
+        if (png->m_read) {
+            png_destroy_read_struct(&png->m_read,
+                                    png->m_info ? &png->m_info : (png_infopp) 0,
+                                    (png_infopp) 0);
+        }
+        if (png->m_pixmap) {
+            rc = screen_destroy_pixmap(png->m_pixmap);
+            if(rc) {
+                DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            }
+        } else if (png->m_buffer) {
+            rc = screen_destroy_buffer(png->m_buffer);
+            if(rc) {
+                DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            }
+        }
+        free(png->m_rows);
+        free(png->m_data);
+        free(png);
+    }
+}
+
+static bool tco_png_reader_read(png_reader_t png, const char * fileName) {
+    if(!png || !fileName || fileName[0] == 0) {
+        DEBUGLOG("No PNG file to read");
+        return false;
+    }
+
+    bool result = false;
+    FILE * file = NULL;
+    while(true) {
+        file = fopen(fileName, "r");
+        if(!file) {
+            DEBUGLOG("Could not open PNG file: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        png_byte header[8];
+        if(fread(header, 1, sizeof(header), file) < sizeof(header)) {
+            DEBUGLOG("Could not read PNG file: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        if (png_sig_cmp(header, 0, sizeof(header))) {
+            DEBUGLOG("Invalid PNG signature");
+            break;
+        }
+
+        png->m_read = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+        if (!png->m_read) {
+            DEBUGLOG("Could not read PNG structure: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        png->m_info = png_create_info_struct(png->m_read);
+        if (!png->m_info) {
+            DEBUGLOG("Could not create PNG info structure: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        if (setjmp(png_jmpbuf(png->m_read))) {
+            DEBUGLOG("Could not process PNG file: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        png_init_io(png->m_read, file);
+        png_set_sig_bytes(png->m_read, sizeof(header));
+        png_read_info(png->m_read, png->m_info);
+
+        png->m_width = png_get_image_width(png->m_read, png->m_info);
+        if (png->m_width <= 0 || png->m_width > 1024) {
+            DEBUGLOG("Invalid PNG width: %d", png->m_width);
+            break;
+        }
+
+        png->m_height = png_get_image_height(png->m_read, png->m_info);
+        if (png->m_height <= 0 || png->m_height > 600) {
+            DEBUGLOG("Invalid PNG height: %d", png->m_height);
+            break;
+        }
+
+        png_byte color_type = png_get_color_type(png->m_read, png->m_info);
+        if(PNG_COLOR_TYPE_RGBA != color_type) {
+            DEBUGLOG("Invalid PNG color type %d, must be %d (in file %s)", color_type, PNG_COLOR_TYPE_RGBA, fileName);
+            break;
+        }
+        png_byte bit_depth = png_get_bit_depth(png->m_read, png->m_info);
+        if(8 != bit_depth) {
+            DEBUGLOG("Invalid PNG bit depth %d, must be %d (in file %s)\n", bit_depth, 8, fileName);
+            break;
+        }
+
+        png_read_update_info(png->m_read, png->m_info);
+
+        const int channels = 4;
+        png_set_palette_to_rgb(png->m_read);
+        png_set_tRNS_to_alpha(png->m_read);
+        png_set_bgr(png->m_read);
+        png_set_expand(png->m_read);
+        png_set_strip_16(png->m_read);
+        png_set_gray_to_rgb(png->m_read);
+
+        if (png_get_channels(png->m_read, png->m_info) < channels) {
+            png_set_filler(png->m_read, 0xff, PNG_FILLER_AFTER);
+        }
+
+        png->m_data = (unsigned char*)calloc(1, png->m_width * png->m_height * channels);
+        if(!png->m_data) {
+            DEBUGLOG("%s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        int png_stride = png->m_width * channels;
+        png->m_rows = (png_bytep*)calloc(1, png->m_height * sizeof(png_bytep));
+        if(!png->m_rows) {
+            DEBUGLOG("%s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        int i;
+        for (i = png->m_height - 1; i >= 0; --i) {
+            png->m_rows[i] = (png_bytep)(png->m_data + i * png_stride);
+        }
+        png_read_image(png->m_read, png->m_rows);
+
+        int rc;
+        int format = SCREEN_FORMAT_RGBA8888;
+        int size[2] = {png->m_width, png->m_height};
+
+        rc = screen_create_pixmap(&png->m_pixmap, png->m_context);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        rc = screen_set_pixmap_property_iv(png->m_pixmap,
+                                           SCREEN_PROPERTY_FORMAT,
+                                           &format);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        rc = screen_set_pixmap_property_iv(png->m_pixmap,
+                                           SCREEN_PROPERTY_BUFFER_SIZE,
+                                           size);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        rc = screen_create_pixmap_buffer(png->m_pixmap);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        unsigned char *realPixels;
+        int realStride;
+        rc = screen_get_pixmap_property_pv(png->m_pixmap,
+                                           SCREEN_PROPERTY_RENDER_BUFFERS,
+                                           (void**)&png->m_buffer);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        rc = screen_get_buffer_property_pv(png->m_buffer,
+                                           SCREEN_PROPERTY_POINTER,
+                                           (void **)&realPixels);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        rc = screen_get_buffer_property_iv(png->m_buffer,
+                                           SCREEN_PROPERTY_STRIDE,
+                                           &realStride);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            break;
+        }
+
+        memset(realPixels, 0, realStride * png->m_height * sizeof(unsigned char));
+
+        unsigned char * buffer_pixel_row = realPixels;
+        unsigned char * png_pixel_row = png->m_data;
+        for(i = 0; i < png->m_height; ++i) {
+            memcpy(buffer_pixel_row, png_pixel_row, realStride);
+            png_pixel_row += png_stride;
+            buffer_pixel_row += realStride;
+        }
+
+        /* we copied the data - no need to keep the copy in memory */
+        free(png->m_rows);
+        png->m_rows = NULL;
+        free(png->m_data);
+        png->m_data = NULL;
+
+        result = true;
+        break;
+    }
+
+    if(file) {
+        fclose(file);
+    }
+    return result;
+}
+
 /* TCO window functions */
 static bool tco_window_set_parent(tco_window_t window,
-                                  screen_window_t parent);
-
-static void tco_window_init(tco_window_t window,
-                            int width,
-                            int height,
-                            int alpha,
-                            screen_window_t parent);
-
-static bool tco_window_set_z_order(tco_window_t window,
-                                   int zOrder);
-
-static bool tco_window_set_touch_sensitivity(tco_window_t window,
-                                             int sensitivity);
-
-static void tco_window_post(tco_window_t window,
-                            screen_buffer_t buffer);
-
-static void tco_window_done(tco_window_t window);
-
-static bool tco_window_set_parent(tco_window_t window,
                                   screen_window_t parent) {
-    if(!window)
+    if(!window) {
         return false;
-    int rc;
+    }
     if (parent == window->m_parent) {
         return true;
     }
 
+    int rc;
     if (parent != 0) {
         char buffer[256] = {0};
 
         rc = screen_get_window_property_cv(parent, SCREEN_PROPERTY_GROUP, 256, buffer);
         if (rc) {
-            DEBUGLOG("%s (%d)", strerror(errno), rc);
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
             return false;
         }
 
         rc = screen_join_window_group(window->m_window, buffer);
         if (rc) {
-            DEBUGLOG("%s (%d)", strerror(errno), rc);
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
             return false;
         }
+
         window->m_parent = parent;
     } else if (window->m_parent) {
         rc = screen_leave_window_group(window->m_window);
         if (rc) {
-            DEBUGLOG("%s (%d)", strerror(errno), rc);
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
             return false;
         }
         window->m_parent = 0;
@@ -199,17 +544,53 @@ static bool tco_window_set_parent(tco_window_t window,
     return true;
 }
 
-static void tco_window_init(tco_window_t window,
-                            int width,
-                            int height,
-                            int alpha,
-                            screen_window_t parent) {
-    if(!window)
-        return;
+static bool tco_window_get_pixels(tco_window_t window,
+                                  screen_buffer_t *buffer,
+                                  unsigned char ** pixels,
+                                  int *stride) {
+    screen_buffer_t buffers[2];
+    int rc = screen_get_window_property_pv(window->m_window,
+                                           SCREEN_PROPERTY_RENDER_BUFFERS,
+                                           (void**)buffers);
+    if (rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+    *buffer = buffers[0];
+
+    rc = screen_get_buffer_property_pv(*buffer,
+                                       SCREEN_PROPERTY_POINTER,
+                                       (void **)pixels);
+    if (rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    rc = screen_get_buffer_property_iv(*buffer,
+                                       SCREEN_PROPERTY_STRIDE,
+                                       stride);
+    if (rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    return true;
+}
+
+static bool tco_window_init_ex(tco_window_t window,
+                               screen_context_t context,
+                               int width,
+                               int height,
+                               int alpha,
+                               screen_window_t parent) {
+    if(!window) {
+        return false;
+    }
+    window->m_context = context;
+
     int rc;
     int format = SCREEN_FORMAT_RGBA8888;
     int usage = SCREEN_USAGE_NATIVE | SCREEN_USAGE_READ | SCREEN_USAGE_WRITE;
-    int temp[2];
 
     memset(window, 0, sizeof(struct tco_window));
     window->m_size[0] = width;
@@ -220,117 +601,97 @@ static void tco_window_init(tco_window_t window,
                                     window->m_context,
                                     SCREEN_CHILD_WINDOW);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
-        return;
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
     }
 
     rc = screen_set_window_property_iv(window->m_window,
                                        SCREEN_PROPERTY_FORMAT,
                                        &format);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
         screen_destroy_window(window->m_window);
         window->m_window = 0;
-        return;
+        return false;
     }
 
     rc = screen_set_window_property_iv(window->m_window,
                                        SCREEN_PROPERTY_USAGE,
                                        &usage);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
         screen_destroy_window(window->m_window);
         window->m_window = 0;
-        return;
+        return false;
     }
 
-    if (parent) {
-        rc = screen_set_window_property_iv(parent,
-                                           SCREEN_PROPERTY_SIZE,
-                                           temp);
-        if (rc) {
-            DEBUGLOG("%s (%d)", strerror(errno), rc);
-            screen_destroy_window(window->m_window);
-            window->m_window = 0;
-            return;
-        }
-
-        rc = screen_set_window_property_iv(window->m_window,
-                                           SCREEN_PROPERTY_SIZE,
-                                           temp);
-        if (rc) {
-            DEBUGLOG("%s (%d)", strerror(errno), rc);
-            screen_destroy_window(window->m_window);
-            window->m_window = 0;
-            return;
-        }
-
-        rc = screen_get_window_property_iv(parent,
-                                           SCREEN_PROPERTY_POSITION,
-                                           temp);
-        if (rc) {
-            DEBUGLOG("%s (%d)", strerror(errno), rc);
-            screen_destroy_window(window->m_window);
-            window->m_window = 0;
-            return;
-        }
-
-        rc = screen_set_window_property_iv(window->m_window,
-                                           SCREEN_PROPERTY_POSITION,
-                                           temp);
-        if (rc) {
-            DEBUGLOG("%s (%d)", strerror(errno), rc);
-            screen_destroy_window(window->m_window);
-            window->m_window = 0;
-            return;
-        }
-    } else {
-        rc = screen_set_window_property_iv(window->m_window,
-                                           SCREEN_PROPERTY_SIZE,
-                                           window->m_size);
-        if (rc) {
-            DEBUGLOG("%s (%d)", strerror(errno), rc);
-            screen_destroy_window(window->m_window);
-            window->m_window = 0;
-            return;
-        }
+    rc = screen_set_window_property_iv(window->m_window,
+                                       SCREEN_PROPERTY_SIZE,
+                                       window->m_size);
+    if (rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        screen_destroy_window(window->m_window);
+        window->m_window = 0;
+        return false;
     }
 
     rc = screen_set_window_property_iv(window->m_window,
                                        SCREEN_PROPERTY_BUFFER_SIZE,
                                        window->m_size);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
         screen_destroy_window(window->m_window);
         window->m_window = 0;
-        return;
+        return false;
     }
 
-    rc = screen_create_window_buffers(window->m_window, 2);
+    rc = screen_create_window_buffers(window->m_window, 1);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
         screen_destroy_window(window->m_window);
         window->m_window = 0;
-        return;
+        return false;
     }
 
     if (!tco_window_set_parent(window, parent))
     {
         screen_destroy_window(window->m_window);
         window->m_window = 0;
-        return;
+        return false;
     }
+
+    return true;
+}
+
+static bool tco_window_init(tco_window_t window,
+                            screen_context_t context,
+                            screen_window_t parent) {
+    int rc = screen_get_window_property_iv(parent,
+                                           SCREEN_PROPERTY_BUFFER_SIZE,
+                                           window->m_size);
+    if (rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+    window->m_alpha = 0xFF;
+    return tco_window_init_ex(window,
+                             context,
+                             window->m_size[0],
+                             window->m_size[1],
+                             window->m_alpha,
+                             parent);
 }
 
 static bool tco_window_set_z_order(tco_window_t window,
                                    int zOrder) {
-    if(!window)
+    if(!window) {
         return false;
+    }
     int rc = screen_set_window_property_iv(window->m_window,
                                            SCREEN_PROPERTY_ZORDER,
                                            &zOrder);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
         return false;
     }
     return true;
@@ -338,33 +699,43 @@ static bool tco_window_set_z_order(tco_window_t window,
 
 static bool tco_window_set_touch_sensitivity(tco_window_t window,
                                              int sensitivity) {
-    if(!window)
+    if(!window) {
         return false;
+    }
     sensitivity = (sensitivity > 0 ? SCREEN_SENSITIVITY_ALWAYS:SCREEN_SENSITIVITY_NEVER);
     int rc = screen_set_window_property_iv(window->m_window,
                                            SCREEN_PROPERTY_SENSITIVITY,
                                            &sensitivity);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
         return false;
     }
     return true;
 }
 
-static void tco_window_post(tco_window_t window,
+static bool tco_window_post(tco_window_t window,
                             screen_buffer_t buffer) {
-    if(!window)
-        return;
+    if(!window) {
+        return false;
+    }
     int dirtyRects[4] = {0, 0, window->m_size[0], window->m_size[1]};
-    screen_post_window(window->m_window, buffer, 1, dirtyRects, 0);
+    int rc = screen_post_window(window->m_window, buffer, 1, dirtyRects, 0);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+    return true;
 }
 
 static void tco_window_done(tco_window_t window) {
-    if(!window)
+    if(!window) {
         return;
+    }
     if (window->m_window) {
-        screen_destroy_window(window->m_window);
-        window->m_window = 0;
+        int rc = screen_destroy_window(window->m_window);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        }
     }
     memset(window, 0, sizeof(struct tco_window));
 }
@@ -374,34 +745,27 @@ static void tco_window_done(tco_window_t window) {
 static tco_label_window_t tco_label_window_alloc(screen_context_t context,
                                                  int width,
                                                  int height,
-                                                 int alpha);
-
-static void tco_label_window_free(tco_label_window_t window);
-
-static void tco_label_window_show_at(tco_label_window_t window,
-                                     screen_window_t parent,
-                                     int x,
-                                     int y);
-
-static void tco_label_window_move(tco_label_window_t window,
-                                  int x,
-                                  int y);
-
-static void tco_label_window_draw(tco_label_window_t label_window,
-                                  screen_window_t window,
-                                  int x,
-                                  int y);
-
-static tco_label_window_t tco_label_window_alloc(screen_context_t context,
-                                                 int width,
-                                                 int height,
                                                  int alpha) {
     tco_label_window_t window = (tco_label_window_t)calloc(1, sizeof(struct tco_label_window));
-    tco_window_init(&window->m_baseWindow, width, height, alpha, 0);
-
-    tco_window_set_z_order(&window->m_baseWindow, 6);
-    tco_window_set_touch_sensitivity(&window->m_baseWindow, 0);
-
+    if(!tco_window_init_ex(&window->m_baseWindow,
+                           context,
+                           width,
+                           height,
+                           alpha,
+                           NULL)) {
+        free(window);
+        return NULL;
+    }
+    if(!tco_window_set_z_order(&window->m_baseWindow, 6)) {
+        tco_window_done(&window->m_baseWindow);
+        free(window);
+        return NULL;
+    }
+    if(!tco_window_set_touch_sensitivity(&window->m_baseWindow, 0)) {
+        tco_window_done(&window->m_baseWindow);
+        free(window);
+        return NULL;
+    }
     window->m_offset[0] = 0;
     window->m_offset[1] = 0;
     window->m_scale[0] = 1.0f;
@@ -411,36 +775,82 @@ static tco_label_window_t tco_label_window_alloc(screen_context_t context,
 
 static void tco_label_window_free(tco_label_window_t window) {
     if(window) {
-        //TODO:
         tco_window_done(&window->m_baseWindow);
         free(window);
     }
 }
 
-static void tco_label_window_show_at(tco_label_window_t window,
+static bool tco_label_window_move(tco_label_window_t window,
+                                  int x,
+                                  int y) {
+    if(!window) {
+        return false;
+    }
+    int position[] = {window->m_offset[0] + (x * window->m_scale[0]),
+                      window->m_offset[1] + (y * window->m_scale[1])};
+    int rc = screen_set_window_property_iv(window->m_baseWindow.m_window,
+                                           SCREEN_PROPERTY_POSITION,
+                                           position);
+    if (rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+    return true;
+}
+
+static bool tco_label_window_show_at(tco_label_window_t window,
                                      screen_window_t parent,
                                      int x,
                                      int y) {
-    if(!window)
-        return;
+    if(!window) {
+        return false;
+    }
     int rc = 0;
     if (parent && parent != window->m_baseWindow.m_parent) {
         int parentBufferSize[2];
         int parentSize[2];
-        rc = screen_get_window_property_iv(parent, SCREEN_PROPERTY_POSITION, window->m_offset);
-        rc = screen_get_window_property_iv(parent, SCREEN_PROPERTY_BUFFER_SIZE, parentBufferSize);
-        rc = screen_get_window_property_iv(parent, SCREEN_PROPERTY_SIZE, parentSize);
+        rc = screen_get_window_property_iv(parent,
+                                           SCREEN_PROPERTY_POSITION,
+                                           window->m_offset);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            return false;
+        }
+
+        rc = screen_get_window_property_iv(parent,
+                                           SCREEN_PROPERTY_BUFFER_SIZE,
+                                           parentBufferSize);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            return false;
+        }
+
+        rc = screen_get_window_property_iv(parent,
+                                           SCREEN_PROPERTY_SIZE,
+                                           parentSize);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            return false;
+        }
+
         window->m_scale[0] = parentSize[0] / (float)parentBufferSize[0];
         window->m_scale[1] = parentSize[1] / (float)parentBufferSize[1];
+
         int newSize[] = {window->m_baseWindow.m_size[0] * window->m_scale[0],
                          window->m_baseWindow.m_size[1] * window->m_scale[1]};
+
         rc = screen_set_window_property_iv(window->m_baseWindow.m_window,
                                            SCREEN_PROPERTY_SIZE,
                                            newSize);
+        if(rc) {
+            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+            return false;
+        }
     }
 
-    if (!tco_window_set_parent(&window->m_baseWindow, parent))
-        return;
+    if (!tco_window_set_parent(&window->m_baseWindow, parent)) {
+        return false;
+    }
 
     tco_label_window_move(window, x, y);
 
@@ -449,54 +859,354 @@ static void tco_label_window_show_at(tco_label_window_t window,
                                        SCREEN_PROPERTY_VISIBLE,
                                        &visible);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
     }
+
+    return true;
 }
 
-static void tco_label_window_move(tco_label_window_t window,
-                                  int x,
-                                  int y) {
-    if(!window)
-        return;
-    int position[] = {window->m_offset[0] + (x * window->m_scale[0]),
-                      window->m_offset[1] + (y * window->m_scale[1])};
-    int rc = screen_set_window_property_iv(window->m_baseWindow.m_window,
-                                           SCREEN_PROPERTY_POSITION,
-                                           position);
-    if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
-        return;
-    }
-}
-
-static void tco_label_window_draw(tco_label_window_t label_window,
+static bool tco_label_window_draw(tco_label_window_t label_window,
                                   screen_window_t window,
-                                  int x,
-                                  int y) {
-    if(!label_window)
-        return;
-    tco_label_window_show_at(label_window, window, x, y);
-}
+                                  png_reader_t png) {
+    if(!label_window) {
+        return false;
+    }
+    int rc;
+    screen_buffer_t buffer;
+    unsigned char *pixels;
+    int stride;
+    if (!tco_window_get_pixels(&label_window->m_baseWindow,
+                               &buffer,
+                               &pixels,
+                               &stride)) {
+        DEBUGLOG("Unable to get window pixels");
+        return false;
+    }
 
+    screen_buffer_t pixmapBuffer;
+    rc = screen_get_pixmap_property_pv(png->m_pixmap,
+                                       SCREEN_PROPERTY_RENDER_BUFFERS,
+                                       (void**)&pixmapBuffer);
+    if(rc != 0) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    const int fill_attribs[] = {
+        SCREEN_BLIT_COLOR, 0x0,
+        SCREEN_BLIT_END
+    };
+    rc = screen_fill(label_window->m_baseWindow.m_context,
+                     buffer,
+                     fill_attribs);
+    if(rc != 0) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    const int blit_attribs[] = {
+            SCREEN_BLIT_SOURCE_X, 0,
+            SCREEN_BLIT_SOURCE_Y, 0,
+            SCREEN_BLIT_SOURCE_WIDTH, png->m_width,
+            SCREEN_BLIT_SOURCE_HEIGHT, png->m_height,
+            SCREEN_BLIT_DESTINATION_X, 0,
+            SCREEN_BLIT_DESTINATION_Y, 0,
+            SCREEN_BLIT_DESTINATION_WIDTH, label_window->m_baseWindow.m_size[0],
+            SCREEN_BLIT_DESTINATION_HEIGHT, label_window->m_baseWindow.m_size[1],
+            SCREEN_BLIT_TRANSPARENCY, SCREEN_TRANSPARENCY_SOURCE,
+            SCREEN_BLIT_GLOBAL_ALPHA, label_window->m_baseWindow.m_alpha,
+            SCREEN_BLIT_SCALE_QUALITY, SCREEN_QUALITY_NICEST,
+            SCREEN_BLIT_END
+    };
+    rc = screen_blit(label_window->m_baseWindow.m_context,
+                     buffer,
+                     pixmapBuffer,
+                     blit_attribs);
+    if(rc != 0) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    if(!tco_window_post(&label_window->m_baseWindow, buffer)) {
+        return false;
+    }
+
+    int visible = 0;
+    rc = screen_set_window_property_iv(label_window->m_baseWindow.m_window,
+                                       SCREEN_PROPERTY_VISIBLE,
+                                       &visible);
+    if(rc != 0) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    return true;
+}
 
 /* Configuration window functions */
-static tco_configuration_window_t tco_configuration_alloc();
-
-static void tco_configuration_window_run(tco_configuration_window_t window);
-
-static void tco_configuration_window_free(tco_configuration_window_t window);
-
-static tco_configuration_window_t tco_configuration_alloc() {
+static tco_configuration_window_t tco_configuration_alloc(screen_context_t context,
+                                                          screen_window_t parent) {
     tco_configuration_window_t window = (tco_configuration_window_t)calloc(1, sizeof(struct tco_configuration_window));
-    tco_window_init(&window->m_baseWindow, width, height, alpha, 0);
+    if(!tco_window_init(&window->m_baseWindow, context, parent)) {
+        free(window);
+        return NULL;
+    }
 
-    tco_window_set_z_order(&window->m_baseWindow, 10);
-    tco_window_set_touch_sensitivity(&window->m_baseWindow, 1);
+    if(!tco_window_set_z_order(&window->m_baseWindow, 10)) {
+        tco_window_done(&window->m_baseWindow);
+        free(window);
+        return NULL;
+    }
+    if(!tco_window_set_touch_sensitivity(&window->m_baseWindow, 1)) {
+        tco_window_done(&window->m_baseWindow);
+        free(window);
+        return NULL;
+    }
     return window;
 }
 
-static void tco_configuration_window_run(tco_configuration_window_t window) {
-    //TODO:
+static bool tco_context_draw_controls(tco_context_t ctx,
+                                      screen_buffer_t buffer);
+
+static screen_buffer_t tco_configuration_window_draw(tco_configuration_window_t window,
+                                                     tco_context_t context) {
+    if(!window) {
+        return NULL;
+    }
+    screen_buffer_t buffer;
+    unsigned char *pixels;
+    int stride;
+    if (!tco_window_get_pixels(&window->m_baseWindow,
+                               &buffer,
+                               &pixels,
+                               &stride)) {
+        return NULL;
+    }
+
+    int y=0,x=0;
+    unsigned char c;
+    const int cell_size = 16;
+    for (y=0; y< window->m_baseWindow.m_size[1]; y++) {
+        int t = y & cell_size;
+        int h = y * stride;
+        for (x=0; x < window->m_baseWindow.m_size[0]; x++) {
+            int p = x * 4;
+            c = ((x & cell_size) ^ t) ? 0xa0 : 0x80;
+            pixels[h + p + 0] = c;
+            pixels[h + p + 1] = c;
+            pixels[h + p + 2] = c;
+            pixels[h + p + 3] = 0xa0;
+        }
+    }
+
+    if(!tco_context_draw_controls(context, buffer)) {
+        return NULL;
+    }
+    return buffer;
+}
+
+static tco_control_t tco_context_control_at(tco_context_t ctx,
+                                            int x,
+                                            int y);
+
+static bool tco_control_move(tco_control_t control,
+                             int dx,
+                             int dy,
+                             int max_x,
+                             int max_y);
+
+static bool tco_configuration_window_run(tco_configuration_window_t window,
+                                         tco_context_t context) {
+    if(!window) {
+        return false;
+    }
+
+    screen_buffer_t buffer = tco_configuration_window_draw(window, context);
+
+    bool showingWindow = true;
+    int rc;
+    rc = bps_initialize();
+    if(rc!=BPS_SUCCESS) {
+        DEBUGLOG("bps: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    rc = screen_request_events(context->m_screenContext);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        bps_shutdown();
+        return false;
+    }
+
+    bps_event_t *event;
+    screen_event_t screen_event;
+    int eventType;
+    int contactId;
+    bool touching = false;
+    bool releasedThisRound = false;
+    int startPos[2] = {0,0};
+    int endPos[2] = {0,0};
+
+    while(showingWindow)
+    {
+        releasedThisRound = false;
+
+        rc = bps_get_event(&event, 0);
+        if(rc!=BPS_SUCCESS) {
+            DEBUGLOG("bps: %s (%d)", strerror(errno), errno);
+            bps_shutdown();
+            return false;
+        }
+
+        while(showingWindow && event) {
+            int domain = bps_event_get_domain(event);
+            if (domain == navigator_get_domain())
+            {
+                if (bps_event_get_code(event) == NAVIGATOR_SWIPE_DOWN)
+                    showingWindow = false;
+                else if (bps_event_get_code(event) == NAVIGATOR_EXIT) {
+                    showingWindow = false;
+                }
+            } else if (domain == screen_get_domain()) {
+                screen_event = screen_event_get_event(event);
+
+                rc = screen_get_event_property_iv(screen_event,
+                                                  SCREEN_PROPERTY_TYPE,
+                                                  &eventType);
+                if(rc) {
+                    DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+                    bps_shutdown();
+                    return false;
+                }
+
+                rc = screen_get_event_property_iv(screen_event,
+                                                  SCREEN_PROPERTY_TOUCH_ID,
+                                                  &contactId);
+                if(rc) {
+                    DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+                    bps_shutdown();
+                    return false;
+                }
+
+                switch (eventType)
+                {
+                case SCREEN_EVENT_MTOUCH_TOUCH:
+                    rc = screen_get_event_property_iv(screen_event,
+                                                      SCREEN_PROPERTY_TOUCH_ID,
+                                                      &contactId);
+                    if(rc) {
+                        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+                        bps_shutdown();
+                        return false;
+                    }
+
+                    if (contactId == 0 && !touching && !releasedThisRound) {
+                        touching = true;
+                        rc = screen_get_event_property_iv(screen_event,
+                                                          SCREEN_PROPERTY_SOURCE_POSITION,
+                                                          startPos);
+                        if(rc) {
+                            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+                            bps_shutdown();
+                            return false;
+                        }
+
+                        endPos[0] = startPos[0];
+                        endPos[1] = startPos[1];
+                    }
+                    break;
+                case SCREEN_EVENT_MTOUCH_MOVE:
+                    rc = screen_get_event_property_iv(screen_event,
+                                                      SCREEN_PROPERTY_TOUCH_ID,
+                                                      &contactId);
+                    if(rc) {
+                        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+                        bps_shutdown();
+                        return false;
+                    }
+
+                    if (contactId == 0 && touching) {
+                        rc = screen_get_event_property_iv(screen_event,
+                                                          SCREEN_PROPERTY_SOURCE_POSITION,
+                                                          endPos);
+                        if(rc) {
+                            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+                            bps_shutdown();
+                            return false;
+                        }
+                    }
+                    break;
+                case SCREEN_EVENT_MTOUCH_RELEASE:
+                    rc = screen_get_event_property_iv(screen_event,
+                                                      SCREEN_PROPERTY_TOUCH_ID,
+                                                      &contactId);
+                    if(rc) {
+                        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+                        bps_shutdown();
+                        return false;
+                    }
+
+                    if (contactId == 0 && touching) {
+                        touching = false;
+                        releasedThisRound = true;
+                        rc = screen_get_event_property_iv(screen_event,
+                                                          SCREEN_PROPERTY_SOURCE_POSITION,
+                                                          endPos);
+                        if(rc) {
+                            DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+                            bps_shutdown();
+                            return false;
+                        }
+                    }
+                    break;
+                case SCREEN_EVENT_PROPERTY:
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            rc = bps_get_event(&event, 0);
+            if(rc!=BPS_SUCCESS) {
+                DEBUGLOG("bps: %s (%d)", strerror(errno), errno);
+                bps_shutdown();
+                return false;
+            }
+        }
+
+        if (releasedThisRound) {
+            window->m_selected = 0;
+        } else if (touching) {
+            if (!window->m_selected) {
+                window->m_selected = tco_context_control_at(context,
+                                                            startPos[0],
+                                                            startPos[1]);
+            }
+
+            if (window->m_selected &&
+                (endPos[0] != startPos[0] || endPos[1] != startPos[1])) {
+                tco_control_move(window->m_selected,
+                                 endPos[0] - startPos[0],
+                                 endPos[1] - startPos[1],
+                                 window->m_baseWindow.m_size[0],
+                                 window->m_baseWindow.m_size[1]);
+
+                buffer = tco_configuration_window_draw(window, context);
+
+                startPos[0] = endPos[0];
+                startPos[1] = endPos[1];
+            }
+        }
+
+        if (buffer) {
+            tco_window_post(&window->m_baseWindow, buffer);
+        }
+    }
+
+    bps_shutdown();
+
+    return true;
 }
 
 static void tco_configuration_window_free(tco_configuration_window_t window) {
@@ -505,7 +1215,6 @@ static void tco_configuration_window_free(tco_configuration_window_t window) {
         free(window);
     }
 }
-
 
 /* Label functions */
 static tco_label_t tco_label_alloc(screen_context_t context,
@@ -526,8 +1235,18 @@ static tco_label_t tco_label_alloc(screen_context_t context,
                                              width,
                                              height,
                                              alpha);
-    //TODO: image
-    //label->m_window->draw(png);
+    if(image) {
+        label->m_image_file = strdup(image);
+        png_reader_t png = tco_png_reader_alloc(context);
+        if(png) {
+            if(tco_png_reader_read(png, label->m_image_file)) {
+                tco_label_window_draw(label->m_window,
+                                      label->m_window->m_baseWindow.m_window,
+                                      png);
+            }
+            tco_png_reader_free(png);
+        }
+    }
     return label;
 }
 
@@ -535,72 +1254,31 @@ static void tco_label_free(tco_label_t label) {
     if(label) {
         label->m_control = NULL;
         tco_label_window_free(label->m_window);
-        //TODO: free image?
+        free(label->m_image_file);
         free(label);
     }
 }
 
-static void tco_label_draw(tco_label_t label,
+static bool tco_label_draw(tco_label_t label,
                            screen_window_t window,
                            int x,
                            int y) {
-    tco_label_window_draw(label->m_window,
-                          window,
-                          label->m_x + x,
-                          label->m_y + y);
+    return tco_label_window_show_at(label->m_window,
+                                    window,
+                                    label->m_x + x,
+                                    label->m_y + y);
 }
 
-static void tco_label_move(tco_label_t label,
+static bool tco_label_move(tco_label_t label,
                            int x,
                            int y) {
-    tco_label_window_move(label->m_window,
-                          label->m_x + x,
-                          label->m_y + y);
+    return tco_label_window_move(label->m_window,
+                                 label->m_x + x,
+                                 label->m_y + y);
 }
 
 
 /* Control functions */
-static tco_control_t tco_control_alloc(screen_context_t context,
-                                       int id,
-                                       const char * controlType,
-                                       int x,
-                                       int y,
-                                       int width,
-                                       int height);
-
-static void tco_control_free(tco_control_t control);
-
-static void tco_control_add_label(tco_control_t control,
-                                  tco_label_t label);
-
-static void tco_control_draw(tco_control_t control,
-                             screen_buffer_t buffer);
-
-static void tco_control_move(tco_control_t control,
-                             int dx,
-                             int dy,
-                             int max_x,
-                             int max_h);
-
-static void tco_control_fill(tco_control_t control);
-
-static void tco_control_show_label(tco_control_t control,
-                                   screen_window_t window);
-
-static bool tco_control_in_bounds(tco_control_t control,
-                                  int x,
-                                  int y);
-
-static bool tco_control_handle_tap(tco_control_t control,
-                                   int contactId,
-                                   const int pos[]);
-
-static bool tco_control_handle_touch(tco_control_t control,
-                                     int type,
-                                     int contactId,
-                                     const int pos[],
-                                     long long timestamp);
-
 static tco_control_t tco_control_alloc(screen_context_t context,
                                        int id,
                                        const char * controlType,
@@ -630,30 +1308,34 @@ static tco_control_t tco_control_alloc(screen_context_t context,
     control->m_height = height;
     control->m_srcWidth = width;
     control->m_srcHeight = height;
-    control->m_contactId = -1;
+    control->m_touchId = -1;
     return control;
 }
 
 static void tco_control_free(tco_control_t control) {
-    if(control->m_pixmap!=NULL) {
+    tco_label_free(control->m_label);
+    if(control->m_pixmap != NULL) {
         screen_destroy_pixmap(control->m_pixmap);
         control->m_pixmap = NULL;
+    } else if(control->m_buffer != NULL) {
+        screen_destroy_buffer(control->m_buffer);
+        control->m_buffer = NULL;
     }
-    //TODO:m_buffer
-    tco_label_free(control->m_label);
+    free(control->m_image_file);
     free(control);
 }
 
-static void tco_control_add_label(tco_control_t control, tco_label_t label) {
-    control->m_label = label;
-    label->m_control = control;
-}
+static bool tco_control_draw(tco_control_t control, screen_buffer_t buffer) {
+    int rc;
+    rc = screen_get_pixmap_property_pv(control->m_pixmap,
+                                       SCREEN_PROPERTY_RENDER_BUFFERS,
+                                       (void**)&control->m_buffer);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
 
-static void tco_control_draw(tco_control_t control, screen_buffer_t buffer) {
-    screen_get_pixmap_property_pv(control->m_pixmap,
-                                  SCREEN_PROPERTY_RENDER_BUFFERS,
-                                  (void**)&control->m_buffer);
-    int attribs[] = {
+    const int blit_attribs[] = {
             SCREEN_BLIT_SOURCE_X, 0,
             SCREEN_BLIT_SOURCE_Y, 0,
             SCREEN_BLIT_SOURCE_WIDTH, control->m_srcWidth,
@@ -665,14 +1347,26 @@ static void tco_control_draw(tco_control_t control, screen_buffer_t buffer) {
             SCREEN_BLIT_TRANSPARENCY, SCREEN_TRANSPARENCY_SOURCE_OVER,
             SCREEN_BLIT_END
     };
-    screen_blit(control->m_context, buffer, control->m_buffer, attribs);
+
+    rc = screen_blit(control->m_context,
+                     buffer,
+                     control->m_buffer,
+                     blit_attribs);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+    return true;
 }
 
-static void tco_control_move(tco_control_t control,
+static bool tco_control_move(tco_control_t control,
                              int dx,
                              int dy,
                              int max_x,
                              int max_y) {
+    if(!control) {
+        return false;
+    }
     control->m_x += dx;
     control->m_y += dy;
     if (control->m_x <= 0)
@@ -683,10 +1377,10 @@ static void tco_control_move(tco_control_t control,
         control->m_x = max_x - control->m_width;
     if (control->m_y + control->m_height >= max_y)
         control->m_y = max_y - control->m_height;
-    tco_label_move(control->m_label, control->m_x, control->m_y);
+    return tco_label_move(control->m_label, control->m_x, control->m_y);
 }
 
-static void tco_control_fill(tco_control_t control) {
+static bool tco_control_fill(tco_control_t control) {
     static unsigned controlNum = 0;
     static uint32_t controlColors[] = { 0xaaff0000, 0xaa00ff00, 0xaa0000ff, 0xaaffff00, 0xaaff00ff, 0xaa00ffff };
 
@@ -696,216 +1390,319 @@ static void tco_control_fill(tco_control_t control) {
     int rc = screen_create_pixmap(&control->m_pixmap,
                                   control->m_context);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
-        return;
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
     }
 
     rc = screen_set_pixmap_property_iv(control->m_pixmap,
                                        SCREEN_PROPERTY_FORMAT,
                                        &format);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
-        return;
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
     }
 
     rc = screen_set_pixmap_property_iv(control->m_pixmap,
                                        SCREEN_PROPERTY_BUFFER_SIZE,
                                        size);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
-        return;
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
     }
 
     rc = screen_create_pixmap_buffer(control->m_pixmap);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
-        return;
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
     }
     rc = screen_get_pixmap_property_pv(control->m_pixmap,
                                        SCREEN_PROPERTY_RENDER_BUFFERS,
                                        (void**)&control->m_buffer);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
-        return;
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
     }
 
-    int attribs[] = {
+    const int fill_attribs[] = {
         SCREEN_BLIT_COLOR, (int)controlColors[controlNum],
         SCREEN_BLIT_END
     };
-    rc = screen_fill(control->m_context, control->m_buffer, attribs);
+    rc = screen_fill(control->m_context,
+                     control->m_buffer,
+                     fill_attribs);
     if (rc) {
-        DEBUGLOG("%s (%d)", strerror(errno), rc);
-        return;
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
     }
     controlNum++;
     if (controlNum > 5) {
         controlNum = 0;
     }
+    return true;
 }
 
-static void tco_control_show_label(tco_control_t control,
+static bool tco_control_show_label(tco_control_t control,
                                    screen_window_t window) {
-    if(!control)
-        return;
-    if(control->m_label!=NULL) {
-        tco_label_draw(control->m_label, window, control->m_x, control->m_y);
+    if(!control) {
+        return false;
     }
+    if(control->m_label!=NULL) {
+        return tco_label_draw(control->m_label, window, control->m_x, control->m_y);
+    }
+    return true;
 }
 
 static bool tco_control_in_bounds(tco_control_t control,
                                   int x,
                                   int y) {
-    if(!control)
+    if(!control) {
         return false;
+    }
     return (x >= control->m_x &&
             x <= control->m_x + control->m_width &&
             y >= control->m_y &&
             y <= control->m_y + control->m_height);
 }
 
-static bool tco_control_handle_tap(tco_control_t control,
-                                   int contactId,
-                                   const int pos[]) {
-    if(!control)
-        return false;
-    /*if (!m_tapDispatcher)
-        return false;
-
-    if (m_contactId != -1) {
-        //  We have a contact point set already. No taps allowed.
-        return false;
-    }
-    if (!inBounds(pos))
-        return false;
-
-    return m_tapDispatcher->runCallback(0);*/
-    return false;
-}
-
 static bool tco_control_handle_touch(tco_control_t control,
+                                     tco_context_t context,
                                      int type,
-                                     int contactId,
-                                     const int pos[],
+                                     int touchId,
+                                     int x,
+                                     int y,
                                      long long timestamp) {
-    if(!control)
+    if(!control) {
         return false;
-    return false;
+    }
+    if (control->m_touchId != -1 &&
+        control->m_touchId != touchId) {
+        /*  We have a contact point set and this isn't it. */
+        return false;
+    }
+
+    if (control->m_touchId == -1) {
+        /*  Don't handle orphaned release events. */
+        if (type == SCREEN_EVENT_MTOUCH_RELEASE) {
+            return false;
+        }
+
+        if (!tco_control_in_bounds(control, x, y)) {
+            return false;
+        }
+
+        /*  This is a new touch point that we should start handling */
+        control->m_touchId = touchId;
+
+        switch (control->m_type)
+        {
+        case KEY:
+            if(context->m_handleKeyFunc) {
+                context->m_handleKeyFunc(control->m_properties.key.m_symbol,
+                                         control->m_properties.key.m_modifier,
+                                         control->m_properties.key.m_scancode,
+                                         control->m_properties.key.m_unicode,
+                                         TCO_KB_DOWN);
+            }
+            break;
+        case DPAD:
+            if(context->m_handleDPadFunc) {
+                int angle = atan2((y - control->m_y - control->m_height / 2.0f),
+                                  (x - control->m_x - control->m_width / 2.0f)) * 180 / M_PI;
+                context->m_handleDPadFunc(angle, TCO_KB_DOWN);
+            }
+            break;
+        case TOUCHAREA:
+            control->m_state.touch_area.m_touchDownTime = timestamp;
+            control->m_state.touch_area.m_last_x = x;
+            control->m_state.touch_area.m_last_y = y;
+            break;
+        case MOUSEBUTTON:
+            if(context->m_handleMouseButtonFunc) {
+                context->m_handleMouseButtonFunc(control->m_properties.mouse.m_button,
+                                                 control->m_properties.mouse.m_mask,
+                                                 TCO_MOUSE_BUTTON_DOWN);
+            }
+            break;
+        case TOUCHSCREEN:
+            control->m_state.touch_screen.m_start_x = x;
+            control->m_state.touch_screen.m_start_y = y;
+            control->m_state.touch_screen.m_touchScreenStartTime = timestamp;
+            break;
+        default:
+            break;
+        }
+    } else {
+        if (!tco_control_in_bounds(control, x, y)) {
+            /* Act as if we received a key up */
+            switch (control->m_type)
+            {
+            case KEY:
+                if(context->m_handleKeyFunc) {
+                    context->m_handleKeyFunc(control->m_properties.key.m_symbol,
+                                             control->m_properties.key.m_modifier,
+                                             control->m_properties.key.m_scancode,
+                                             control->m_properties.key.m_unicode,
+                                             TCO_KB_UP);
+                }
+                break;
+            case DPAD:
+                if(context->m_handleDPadFunc) {
+                    int angle = atan2((y - control->m_y - control->m_height / 2.0f),
+                                      (x - control->m_x - control->m_width / 2.0f)) * 180 / M_PI;
+                    context->m_handleDPadFunc(angle, TCO_KB_UP);
+                }
+                break;
+            case TOUCHAREA:
+                if(context->m_handleTouchFunc){
+                    int dx = x - control->m_state.touch_area.m_last_x;
+                    int dy = y - control->m_state.touch_area.m_last_y;
+                    if (dx != 0 || dy != 0) {
+                        context->m_handleTouchFunc(dx, dy);
+                        control->m_state.touch_area.m_last_x = x;
+                        control->m_state.touch_area.m_last_y = y;
+                    }
+                }
+                break;
+            case MOUSEBUTTON:
+                if(context->m_handleMouseButtonFunc) {
+                    context->m_handleMouseButtonFunc(control->m_properties.mouse.m_button,
+                                                     control->m_properties.mouse.m_mask,
+                                                     TCO_MOUSE_BUTTON_UP);
+                }
+                break;
+            case TOUCHSCREEN:
+                control->m_state.touch_screen.m_touchScreenInHoldEvent = false;
+                control->m_state.touch_screen.m_touchScreenInMoveEvent = false;
+                break;
+            default:
+                break;
+            }
+            control->m_touchId = -1;
+            return false;
+        }
+
+        /* We have had a previous touch point from this contact and this point is in bounds */
+        switch (control->m_type)
+        {
+        case KEY:
+            if (type == SCREEN_EVENT_MTOUCH_RELEASE)
+            {
+                if(context->m_handleKeyFunc) {
+                    context->m_handleKeyFunc(control->m_properties.key.m_symbol,
+                                             control->m_properties.key.m_modifier,
+                                             control->m_properties.key.m_scancode,
+                                             control->m_properties.key.m_unicode,
+                                             TCO_KB_UP);
+                }
+            }
+            break;
+        case DPAD:
+            if(context->m_handleDPadFunc) {
+                int angle = atan2((y - control->m_y - control->m_height / 2.0f),
+                                  (x - control->m_x - control->m_width / 2.0f)) * 180 / M_PI;
+                int event = type == SCREEN_EVENT_MTOUCH_RELEASE ? TCO_KB_UP : TCO_KB_DOWN;
+                context->m_handleDPadFunc(angle, event);
+            }
+            break;
+        case TOUCHAREA:
+            if(context->m_handleTouchFunc){
+                if (type == SCREEN_EVENT_MTOUCH_RELEASE &&
+                    (timestamp - control->m_state.touch_area.m_touchDownTime) < TAP_THRESHOLD) {
+                    context->m_handleTapFunc();
+                } else {
+                    if (type == SCREEN_EVENT_MTOUCH_TOUCH) {
+                        control->m_state.touch_area.m_touchDownTime = timestamp;
+                    }
+                    int dx = x - control->m_state.touch_area.m_last_x;
+                    int dy = y - control->m_state.touch_area.m_last_y;
+                    if (dx != 0 || dy != 0) {
+                        context->m_handleTouchFunc(dx, dy);
+                        control->m_state.touch_area.m_last_x = x;
+                        control->m_state.touch_area.m_last_y = y;
+                    }
+                }
+            }
+            break;
+        case MOUSEBUTTON:
+            if (type == SCREEN_EVENT_MTOUCH_RELEASE)
+            {
+                if(context->m_handleMouseButtonFunc) {
+                    context->m_handleMouseButtonFunc(control->m_properties.mouse.m_button,
+                                                     control->m_properties.mouse.m_mask,
+                                                     TCO_MOUSE_BUTTON_UP);
+                }
+            }
+            break;
+        case TOUCHSCREEN:
+            if(context->m_handleTouchScreenFunc) {
+                int distance = abs(x - control->m_state.touch_screen.m_start_x) +
+                               abs(y - control->m_state.touch_screen.m_start_y);
+                if (!control->m_state.touch_screen.m_touchScreenInHoldEvent) {
+                    if ((type == SCREEN_EVENT_MTOUCH_RELEASE) &&
+                        (timestamp - control->m_state.touch_screen.m_touchScreenStartTime) < TAP_THRESHOLD &&
+                        distance < JITTER_THRESHOLD) {
+                        context->m_handleTouchScreenFunc(x, y, 1, 0);
+                    } else if ((type == SCREEN_EVENT_MTOUCH_MOVE) &&
+                               (control->m_state.touch_screen.m_touchScreenInMoveEvent || (distance > JITTER_THRESHOLD))) {
+                        control->m_state.touch_screen.m_touchScreenInMoveEvent = true;
+                        context->m_handleTouchScreenFunc(x, y, 0, 0);
+                    } else if ((type == SCREEN_EVENT_MTOUCH_MOVE) &&
+                               (!control->m_state.touch_screen.m_touchScreenInMoveEvent) &&
+                               (timestamp - control->m_state.touch_screen.m_touchScreenStartTime) > 2*TAP_THRESHOLD) {
+                        control->m_state.touch_screen.m_touchScreenInHoldEvent = true;
+                        context->m_handleTouchScreenFunc(x, y, 0, 1);
+                    }
+                }
+            }
+            break;
+        default:
+            break;
+        }
+
+        if (type == SCREEN_EVENT_MTOUCH_RELEASE) {
+            control->m_touchId = -1;
+            control->m_state.touch_screen.m_touchScreenInHoldEvent = false;
+            control->m_state.touch_screen.m_touchScreenInMoveEvent = false;
+            return false;
+        }
+    }
+
+    return true;
 }
 
-static void tco_control_load_image(tco_control_t control, const char * imageFile) {
-    if(!control)
-        return;
-    //TODO:
-//FILE *file = fopen(filename, "rb");
-//    if (!file) {
-//#ifdef _DEBUG
-//        fprintf(stderr, "Unable to open file %s\n", filename);
-//#endif
-//        return false;
-//    }
-//
-//    PNGReader png(file, filename, m_context);
-//    if (!png.doRead())
-//        return false;
-//
-//    m_srcWidth = png.m_width;
-//    m_srcHeight = png.m_height;
-//    m_pixmap = png.m_pixmap;
-//    png.m_pixmap = 0;
-//    m_buffer = png.m_buffer;
-//    png.m_buffer = 0;
-}
+static bool tco_control_load_image(tco_control_t control, const char * imageFile) {
+    if(!control) {
+        return false;
+    }
+    free(control->m_image_file);
+    control->m_image_file = NULL;
+    if(imageFile) {
+        control->m_image_file = strdup(imageFile);
+    }
 
-static char * tco_read_file(const char * fileName)
-{
-    long len;
-    char *buf = 0;
-    FILE *fp = fopen(fileName, "r");
-    while (fp)
-    {
-        if (0 != fseek(fp, 0, SEEK_END))
-        {
-            break;
+    if(control->m_image_file) {
+        png_reader_t png = tco_png_reader_alloc(control->m_context);
+        if(png) {
+            if(tco_png_reader_read(png, control->m_image_file)) {
+                control->m_srcWidth = png->m_width;
+                control->m_srcHeight = png->m_height;
+                control->m_pixmap = png->m_pixmap;
+                control->m_buffer = png->m_buffer;
+                png->m_buffer = NULL;
+                png->m_pixmap = NULL;
+            } else {
+                tco_png_reader_free(png);
+                return false;
+            }
+            tco_png_reader_free(png);
+        } else {
+            return false;
         }
-        len = ftell(fp);
-        if (len == -1)
-        {
-            break;
-        }
-        if (0 != fseek(fp, 0, SEEK_SET))
-        {
-            break;
-        }
-        buf = (char *) calloc(1, len + 1);
-        if (!buf)
-        {
-            break;
-        }
-        fread(buf, len, 1, fp);
-        if (ferror(fp))
-        {
-            free(buf);
-            buf = 0;
-            break;
-        }
-        break;
     }
-    if (fp)
-    {
-        fclose(fp);
-    }
-    return buf;
-}
-
-static int tco_json_get_int(cJSON * object, const char * name)
-{
-    cJSON * value = cJSON_GetObjectItem(object, name);
-    if (value != NULL && value->type == cJSON_Number)
-    {
-        return value->valueint;
-    }
-    return 0;
-}
-
-static const char * tco_json_get_str(cJSON * object, const char * name)
-{
-    cJSON * value = cJSON_GetObjectItem(object, name);
-    if (value != NULL && value->type == cJSON_String)
-    {
-        return value->valuestring;
-    }
-    return 0;
+    return true;
 }
 
 /* TCO context functions */
-static tco_context_t tco_context_alloc(screen_context_t screenContext,
-                                       struct tco_callbacks callbacks);
-
-static void tco_context_free(tco_context_t ctx);
-
-static tco_control_t tco_context_create_control(tco_context_t ctx,
-                                                int id,
-                                                const char * controlType,
-                                                int x,
-                                                int h,
-                                                int width,
-                                                int height);
-
-static int tco_context_load_controls(tco_context_t ctx,
-                                     const char * fileName);
-
-static int tco_context_load_default_controls(tco_context_t ctx);
-
-static void tco_context_draw_controls(tco_context_t ctx,
-                                      screen_buffer_t buffer);
-
-static int tco_context_show_configuration(tco_context_t ctx,
-                                          screen_window_t window);
-
-static int tco_context_show_labels(tco_context_t ctx,
-                                   screen_window_t window);
-
 static tco_control_t tco_context_control_at(tco_context_t ctx,
                                             int x,
                                             int y);
@@ -923,6 +1720,7 @@ static tco_context_t tco_context_alloc(screen_context_t screenContext,
         ctx->m_handleTapFunc = callbacks.handleTapFunc;
         ctx->m_handleTouchFunc = callbacks.handleTouchFunc;
         ctx->m_handleTouchScreenFunc = callbacks.handleTouchScreenFunc;
+        SLIST_INIT(&ctx->m_touch_owners);
     }
     return ctx;
 }
@@ -940,8 +1738,15 @@ static void tco_context_free(tco_context_t ctx) {
     free(ctx->m_controls);
     ctx->m_controls = NULL;
     ctx->m_numControls = 0;
-    //TODO:
-    //std::map<int, Control *> m_controlMap;
+
+    touch_owner_t p;
+    while(!SLIST_EMPTY(&ctx->m_touch_owners)) {
+        p = SLIST_FIRST(&ctx->m_touch_owners);
+        SLIST_REMOVE_HEAD(&ctx->m_touch_owners, link);
+        free(p);
+    }
+
+    free(ctx->user_control_path);
     free(ctx);
 }
 
@@ -952,6 +1757,10 @@ static tco_control_t tco_context_create_control(tco_context_t ctx,
                                                 int y,
                                                 int width,
                                                 int height) {
+    if(ctx->m_numControls >= MAX_TCO_CONTROLS) {
+        DEBUGLOG("Too many control defined");
+        return NULL;
+    }
     tco_control_t control = tco_control_alloc(ctx->m_screenContext,
                                               id,
                                               controlType,
@@ -965,18 +1774,30 @@ static tco_control_t tco_context_create_control(tco_context_t ctx,
 }
 
 static int tco_context_load_controls(tco_context_t ctx,
-                                     const char * fileName) {
+                                     const char * default_fileName,
+                                     const char * user_fileName) {
     int retCode = TCO_FAILURE;
-    if(!ctx)
+    if(!ctx) {
         return retCode;
-    /* Read JSON file */
+    }
     int version;
     cJSON *root = 0;
-    char * s = tco_read_file(fileName);
-    while (s)
+    /* Read the user JSON file if it is there */
+    char * json_text = tco_read_text_file(user_fileName);
+    if(json_text == NULL) {
+        /* Read the default JSON file */
+        free(ctx->user_control_path);
+        ctx->user_control_path = NULL;
+        json_text = tco_read_text_file(default_fileName);
+    } else {
+        free(ctx->user_control_path);
+        ctx->user_control_path = NULL;
+        ctx->user_control_path = strdup(user_fileName);
+    }
+    while (json_text)
     {
         /* Parse JSON string */
-        root = cJSON_Parse(s);
+        root = cJSON_Parse(json_text);
         if (!root)
         {
 	        DEBUGLOG("Could not parse JSON from string");
@@ -1049,8 +1870,8 @@ static int tco_context_load_controls(tco_context_t ctx,
                         int label_y = tco_json_get_int(label, "y");
                         int label_width = tco_json_get_int(label, "width");
                         int label_height = tco_json_get_int(label, "height");
-                        const char * label_image = tco_json_get_str(label, "image");
                         int label_alpha = tco_json_get_int(label, "alpha");
+                        const char * label_image = tco_json_get_str(label, "image");
 
                         tco_label_t p = tco_label_alloc(ctx->m_screenContext,
                                                         c,
@@ -1060,7 +1881,8 @@ static int tco_context_load_controls(tco_context_t ctx,
                                                         label_height,
                                                         label_alpha,
                                                         label_image);
-                        tco_control_add_label(c, p);
+                        c->m_label = p;
+                        p->m_control = c;
                     }
                 }
                 else
@@ -1082,29 +1904,128 @@ static int tco_context_load_controls(tco_context_t ctx,
 
     if (root != 0)
     {
-        /* Save JSON */
-        /*char * contents = cJSON_Print(root);
-         if(contents) {
-         printf("%s\n", contents);
-         free(contents);
-         }*/
-
         /* Delete JSON structure */
         cJSON_Delete(root);
     }
 
-    if (!s) {
+    if (!json_text) {
         DEBUGLOG("Failed to read JSON file");
     }
-    free(s);
+
+    free(json_text);
     return retCode;
 }
 
-static int tco_context_load_default_controls(tco_context_t ctx) {
-    if(!ctx)
+static int tco_context_save_controls(tco_context_t ctx,
+                                     const char * user_fileName) {
+    if(!ctx) {
         return TCO_FAILURE;
-    int width = atoi(getenv("WIDTH"));
-    int height = atoi(getenv("HEIGHT"));
+    }
+    const char * filePath = user_fileName;
+    if(filePath == NULL) {
+        filePath = ctx->user_control_path;
+    }
+    if(!filePath) {
+        return TCO_SUCCESS; /* No file to be saved, fine */
+    }
+
+    cJSON * root = cJSON_CreateObject();
+    if(root) {
+        tco_json_set_int(root, "version", TCO_FILE_VERSION);
+        cJSON * controls_array = cJSON_CreateArray();
+        cJSON_AddItemToObject(root, "controls", controls_array);
+
+        int i = 0;
+        for(i = 0; i < ctx->m_numControls; ++i) {
+            tco_control_t control = ctx->m_controls[i];
+            if(!control) {
+                continue;
+            }
+
+            cJSON * json_control = cJSON_CreateObject();
+            cJSON_AddItemToArray(controls_array, json_control);
+
+            switch(control->m_type) {
+            case KEY:
+                tco_json_set_str(json_control, "type", "key");
+                tco_json_set_int(json_control, "symbol", control->m_properties.key.m_symbol);
+                tco_json_set_int(json_control, "modifier", control->m_properties.key.m_modifier);
+                tco_json_set_int(json_control, "scancode", control->m_properties.key.m_scancode);
+                tco_json_set_int(json_control, "unicode", control->m_properties.key.m_unicode);
+                break;
+            case DPAD:
+                tco_json_set_str(json_control, "type", "dpad");
+                break;
+            case MOUSEBUTTON:
+                tco_json_set_str(json_control, "type", "mousebutton");
+                tco_json_set_int(json_control, "button", control->m_properties.mouse.m_button);
+                tco_json_set_int(json_control, "mask", control->m_properties.mouse.m_mask);
+                break;
+            case TOUCHAREA:
+                tco_json_set_str(json_control, "type", "toucharea");
+                tco_json_set_int(json_control, "tapSensitive", control->m_properties.touch.m_tapSensitive);
+                break;
+            case TOUCHSCREEN:
+                tco_json_set_str(json_control, "type", "touchscreen");
+                break;
+            default:
+                tco_json_set_str(json_control, "type", "unknown");
+                break;
+            }
+
+            tco_json_set_int(json_control, "id", control->m_id);
+            tco_json_set_int(json_control, "x", control->m_x);
+            tco_json_set_int(json_control, "y", control->m_y);
+            tco_json_set_int(json_control, "width", control->m_width);
+            tco_json_set_int(json_control, "height", control->m_height);
+            if(control->m_image_file) {
+                tco_json_set_str(json_control, "image", control->m_image_file);
+            }
+
+            if(control->m_label != NULL) {
+                cJSON * label = cJSON_CreateObject();
+                cJSON_AddItemToObject(json_control, "label", label);
+
+                tco_json_set_int(label, "x", control->m_label->m_x);
+                tco_json_set_int(label, "y", control->m_label->m_y);
+                tco_json_set_int(label, "width", control->m_label->m_width);
+                tco_json_set_int(label, "height", control->m_label->m_height);
+                tco_json_set_int(label, "alpha", control->m_label->m_window->m_baseWindow.m_alpha);
+                if(control->m_label->m_image_file) {
+                    tco_json_set_str(label, "image", control->m_label->m_image_file);
+                }
+            }
+        }
+
+        char * json_text = cJSON_Print(root);
+        if(json_text) {
+            FILE * file = fopen(filePath, "w");
+            if(file) {
+                size_t nBytes = strlen(json_text);
+                if(nBytes != fwrite(json_text, nBytes, 1, file)) {
+                    DEBUGLOG("Failed to save user controls file: %s (%d)", strerror(errno), errno);
+                }
+                fclose(file);
+            } else {
+                DEBUGLOG("Failed to open user controls for writing: %s (%d)", strerror(errno), errno);
+            }
+        } else {
+            DEBUGLOG("Failed to create JSON: %s (%d)", strerror(errno), errno);
+        }
+
+        cJSON_Delete(root);
+    } else {
+        return TCO_FAILURE;
+    }
+    return TCO_SUCCESS;
+}
+
+static int tco_context_load_default_controls(tco_context_t ctx) {
+    if(!ctx) {
+        return TCO_FAILURE;
+    }
+    int width = 768;
+    int height = 1024;
     tco_control_t control = tco_context_create_control(ctx,
                                                        0,
                                                        "touchscreen",
@@ -1116,62 +2037,175 @@ static int tco_context_load_default_controls(tco_context_t ctx) {
     return TCO_SUCCESS;
 }
 
-static void tco_context_draw_controls(tco_context_t ctx,
+static bool tco_context_draw_controls(tco_context_t ctx,
                                       screen_buffer_t buffer) {
-    if(!ctx)
-        return;
+    if(!ctx) {
+        return false;
+    }
     int i;
     for (i = 0; i < ctx->m_numControls; ++i)
     {
-        tco_control_draw(ctx->m_controls[i], buffer);
+        if(!tco_control_draw(ctx->m_controls[i], buffer)) {
+            return false;
+        }
     }
+    return true;
 }
 
 static int tco_context_show_configuration(tco_context_t ctx,
                                           screen_window_t window) {
-    if(!ctx)
+    if(!ctx) {
         return TCO_FAILURE;
-    ctx->m_appWindow = window;
+    }
     if (!ctx->m_configWindow)
     {
-        // TODO:
-        ctx->m_configWindow = 0; //ConfigWindow::createConfigWindow(m_screenContext, window);
-        if (!ctx->m_configWindow)
+        ctx->m_configWindow = tco_configuration_alloc(ctx->m_screenContext, window);
+        if (ctx->m_configWindow)
         {
+            bool saveConfiguration = tco_configuration_window_run(ctx->m_configWindow, ctx);
+            tco_configuration_window_free(ctx->m_configWindow);
+            ctx->m_configWindow = 0;
+
+            if(saveConfiguration) {
+                tco_context_save_controls(ctx, 0);
+            }
+        } else {
             return TCO_FAILURE;
         }
-        tco_configuration_window_run(ctx->m_configWindow);
-        tco_configuration_window_free(ctx->m_configWindow);
-        ctx->m_configWindow = 0;
     }
     return TCO_SUCCESS;
 }
 
 static int tco_context_show_labels(tco_context_t ctx,
                                    screen_window_t window) {
-    if(!ctx)
+    if(!ctx) {
         return TCO_FAILURE;
+    }
     int i;
     for (i = 0; i < ctx->m_numControls; ++i)
     {
-        tco_control_show_label(ctx->m_controls[i], window);
+        if(!tco_control_show_label(ctx->m_controls[i], window)) {
+            return TCO_FAILURE;
+        }
     }
     return TCO_SUCCESS;
 }
 
 static bool tco_context_touch_event(tco_context_t ctx,
-                                    screen_event_t window) {
-    if(!ctx)
+                                    screen_event_t event) {
+    if(!ctx) {
         return false;
-    //TODO:
-    return false;
+    }
+    int rc;
+    int type;
+    int touch_id;
+    int pos[2];
+    int screenPos[2];
+    int orientation;
+    long long timestamp;
+    int sequenceId;
+    bool handled = false;
+
+    rc = screen_get_event_property_iv(event, SCREEN_PROPERTY_TYPE, &type);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    rc = screen_get_event_property_iv(event, SCREEN_PROPERTY_TOUCH_ID, &touch_id);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    rc = screen_get_event_property_iv(event, SCREEN_PROPERTY_SOURCE_POSITION, pos);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    rc = screen_get_event_property_iv(event, SCREEN_PROPERTY_POSITION, screenPos);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    rc = screen_get_event_property_iv(event, SCREEN_PROPERTY_TOUCH_ORIENTATION, &orientation);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    rc = screen_get_event_property_llv(event, SCREEN_PROPERTY_TIMESTAMP, &timestamp);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    rc = screen_get_event_property_iv(event, SCREEN_PROPERTY_SEQUENCE_ID, &sequenceId);
+    if(rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+
+    /* Find the first owner of the touch_id */
+    tco_control_t touchPointOwner = 0;
+    touch_owner_t p = NULL;
+    SLIST_FOREACH(p, &ctx->m_touch_owners, link) {
+        if(p->touch_id == touch_id) {
+            touchPointOwner = p->control;
+            break;
+        }
+    }
+    if (touchPointOwner) {
+        /* touchPointOwner points to control and p points to list entry */
+        handled = tco_control_handle_touch(touchPointOwner,
+                                           ctx,
+                                           type,
+                                           touch_id,
+                                           pos[0],
+                                           pos[1],
+                                           timestamp);
+        if (!handled) {
+            SLIST_REMOVE(&ctx->m_touch_owners, p, touch_owner, link);
+            free(p);
+        }
+    }
+
+    if (!handled) {
+        int i;
+        for (i = 0; i < ctx->m_numControls; ++i) {
+            if (ctx->m_controls[i] == touchPointOwner) {
+                continue; /* already checked */
+            }
+
+            handled |= tco_control_handle_touch(ctx->m_controls[i],
+                                                ctx,
+                                                type,
+                                                touch_id,
+                                                pos[0],
+                                                pos[1],
+                                                timestamp);
+            if (handled) {
+                p = (touch_owner_t)calloc(1, sizeof(struct touch_owner));
+                p->control = ctx->m_controls[i];
+                p->touch_id = touch_id;
+                SLIST_INSERT_HEAD(&ctx->m_touch_owners, p, link);
+                /* Only allow the first control to handle the touch. */
+                break;
+            }
+        }
+    }
+
+    return handled;
 }
 
 static tco_control_t tco_context_control_at(tco_context_t ctx,
                                             int x,
                                             int y) {
-    if(!ctx)
+    if(!ctx) {
         return NULL;
+    }
     int i;
     for (i = 0; i < ctx->m_numControls; ++i)
     {
@@ -1192,9 +2226,19 @@ int tco_initialize(tco_context_t *context,
 }
 
 int tco_loadcontrols(tco_context_t context,
-                     const char* filename) {
+                     const char* default_filename,
+                     const char* user_filename) {
     tco_context_t c = (tco_context_t)context;
-    return tco_context_load_controls(c, filename);
+    return tco_context_load_controls(c,
+                                     default_filename,
+                                     user_filename);
+}
+
+int tco_savecontrols(tco_context_t context,
+                     const char* user_filename) {
+    tco_context_t c = (tco_context_t)context;
+    return tco_context_save_controls(c,
+                                     user_filename);
 }
 
 int tco_loadcontrols_default(tco_context_t context) {
