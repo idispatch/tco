@@ -35,6 +35,8 @@ __BEGIN_DECLS
  */
 #define TCO_FAILURE (-1)
 
+#define TCO_EXIT (-2)
+
 #define TCO_UNHANDLED (2)
 
 /**
