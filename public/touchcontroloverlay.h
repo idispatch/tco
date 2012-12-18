@@ -19,6 +19,7 @@
 
 #include <sys/platform.h>
 #include <screen/screen.h>
+#include <bps/event.h>
 
 __BEGIN_DECLS
 
@@ -34,8 +35,6 @@ __BEGIN_DECLS
  * may set errno.
  */
 #define TCO_FAILURE (-1)
-
-#define TCO_EXIT (-2)
 
 #define TCO_UNHANDLED (2)
 
@@ -95,26 +94,15 @@ int tco_loadcontrols(tco_context_t context,
 int tco_savecontrols(tco_context_t context,
                      const char* user_filename);
 
-/**
- * Load default controls as a fallback.
- */
-int tco_loadcontrols_default(tco_context_t context);
-
-/**
- * Show configuration window
- * NOTE: the window MUST have a window group set already.
- */
-int tco_swipedown(tco_context_t context, screen_window_t window);
+/**/
+int tco_handle_events(tco_context_t context,
+                      screen_window_t window,
+                      bps_event_t * event);
 
 /**
  * Show overlay labels
  */
-int tco_showlabels(tco_context_t context, screen_window_t window);
-
-/**
- * Provide touch events
- */
-int tco_touch(tco_context_t context, screen_event_t event);
+int tco_drawlabels(tco_context_t context, screen_window_t window);
 
 /**
  * Cleanup and shutdown
