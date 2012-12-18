@@ -71,7 +71,8 @@ struct tco_label_window {
 
 /* TCO configuration window */
 struct tco_configuration_window {
-    struct tco_window m_baseWindow;
+    struct tco_window m_background;
+    struct tco_window m_foreground;
     tco_control_t m_selected;
     int m_startPos[2];
     int m_endPos[2];
@@ -956,41 +957,73 @@ static bool tco_configuration_window_draw(tco_configuration_window_t window,
     if(!window) {
         return false;
     }
-    screen_buffer_t buffer;
-    unsigned char *pixels;
-    int stride;
-    if (!tco_window_get_pixels(&window->m_baseWindow,
-                               &buffer,
-                               &pixels,
-                               &stride)) {
+
+    screen_buffer_t background_buffer;
+    screen_buffer_t foreground_buffer;
+
+    unsigned char *background_pixels;
+    unsigned char *foreground_pixels;
+
+    int background_stride;
+    int foreground_stride;
+
+    if (!tco_window_get_pixels(&window->m_background,
+                               &background_buffer,
+                               &background_pixels,
+                               &background_stride)) {
         return false;
     }
 
-    int y=0,x=0;
+    if (!tco_window_get_pixels(&window->m_foreground,
+                               &foreground_buffer,
+                               &foreground_pixels,
+                               &foreground_stride)) {
+        return false;
+    }
+
+    int x;
+    int y;
     const unsigned char back_alpha = 0x90;
     unsigned char c;
+
     const int cell_size = 16;
-    for (y=0; y< window->m_baseWindow.m_size[1]; y++) {
+    for (y=0; y< window->m_background.m_size[1]; y++) {
         int t = y & cell_size;
-        int h = y * stride;
-        for (x=0; x < window->m_baseWindow.m_size[0]; x++) {
+        int h = y * background_stride;
+        for (x=0; x < window->m_background.m_size[0]; x++) {
             int p = x * 4;
             c = ((x & cell_size) ^ t) ? 0xa0 : 0x80;
-            pixels[h + p + 0] = c;
-            pixels[h + p + 1] = c;
-            pixels[h + p + 2] = c;
-            pixels[h + p + 3] = back_alpha;
+            background_pixels[h + p + 0] = c;
+            background_pixels[h + p + 1] = c;
+            background_pixels[h + p + 2] = c;
+            background_pixels[h + p + 3] = back_alpha;
         }
     }
 
-    if(!tco_window_post(&window->m_baseWindow, buffer)) {
+    const unsigned char fore_alpha = 0x00;
+    for (y=0; y< window->m_foreground.m_size[1]; y++) {
+        int h = y * foreground_stride;
+        for (x=0; x < window->m_foreground.m_size[0]; x++) {
+            int p = x * 4;
+            foreground_pixels[h + p + 0] = 0;
+            foreground_pixels[h + p + 1] = 0;
+            foreground_pixels[h + p + 2] = 0;
+            foreground_pixels[h + p + 3] = fore_alpha;
+        }
+    }
+
+    if(!tco_window_post(&window->m_background, background_buffer)) {
+        return false;
+    }
+
+    if(!tco_window_post(&window->m_foreground, foreground_buffer)) {
         return false;
     }
 
     int i = 0;
-    for(; i < window->m_baseWindow.m_context->m_numControls; ++i) {
-        if(!tco_label_load_image(window->m_baseWindow.m_context,
-                                 window->m_baseWindow.m_context->m_controls[i]->m_label,
+    for(; i < window->m_background.m_context->m_numControls; ++i) {
+        if(!tco_label_load_image(window->m_background.m_context,
+                                 window->m_background.m_context->m_controls[i]->m_label,
                                  (show ? 0xff : -1))) {
             return false;
         }
@@ -1001,18 +1034,40 @@ static bool tco_configuration_window_draw(tco_configuration_window_t window,
 static tco_configuration_window_t tco_configuration_alloc(tco_context_t context,
                                                           screen_window_t parent) {
     tco_configuration_window_t window = (tco_configuration_window_t)calloc(1, sizeof(struct tco_configuration_window));
-    if(!tco_window_init(&window->m_baseWindow, context, parent)) {
+    if(!tco_window_init(&window->m_background, context, parent)) {
+        free(window);
+        return NULL;
+    }
+    if(!tco_window_init(&window->m_foreground, context, parent)) {
+        tco_window_done(&window->m_background);
         free(window);
         return NULL;
     }
 
-    if(!tco_window_set_z_order(&window->m_baseWindow, 10)) {
-        tco_window_done(&window->m_baseWindow);
+    if(!tco_window_set_z_order(&window->m_background, 5)) {
+        tco_window_done(&window->m_background);
+        tco_window_done(&window->m_foreground);
         free(window);
         return NULL;
     }
-    if(!tco_window_set_touch_sensitivity(&window->m_baseWindow, 1)) {
-        tco_window_done(&window->m_baseWindow);
+
+    if(!tco_window_set_z_order(&window->m_foreground, 10)) {
+        tco_window_done(&window->m_background);
+        tco_window_done(&window->m_foreground);
+        free(window);
+        return NULL;
+    }
+
+    if(!tco_window_set_touch_sensitivity(&window->m_background, 0)) {
+        tco_window_done(&window->m_background);
+        tco_window_done(&window->m_foreground);
+        free(window);
+        return NULL;
+    }
+
+    if(!tco_window_set_touch_sensitivity(&window->m_foreground, 1)) {
+        tco_window_done(&window->m_background);
+        tco_window_done(&window->m_foreground);
         free(window);
         return NULL;
     }
@@ -1080,7 +1135,7 @@ static int tco_configuration_window_run(tco_configuration_window_t window,
                         return TCO_FAILURE;
                     }
 
-                    window->m_selected = tco_context_control_at(window->m_baseWindow.m_context,
+                    window->m_selected = tco_context_control_at(window->m_background.m_context,
                                                                 window->m_startPos[0],
                                                                 window->m_startPos[1]);
                     if(window->m_selected) {
@@ -1141,8 +1196,8 @@ static int tco_configuration_window_run(tco_configuration_window_t window,
             if(!tco_control_move(window->m_selected,
                              deltaX,
                              deltaY,
-                             window->m_baseWindow.m_size[0],
-                             window->m_baseWindow.m_size[1])) {
+                             window->m_background.m_size[0],
+                             window->m_background.m_size[1])) {
                 return TCO_FAILURE;
             }
         }
@@ -1154,7 +1209,8 @@ static int tco_configuration_window_run(tco_configuration_window_t window,
 static void tco_configuration_window_free(tco_configuration_window_t window) {
     if (window) {
         tco_configuration_window_draw(window, false);
-        tco_window_done(&window->m_baseWindow);
+        tco_window_done(&window->m_foreground);
+        tco_window_done(&window->m_background);
         free(window);
     }
 }
