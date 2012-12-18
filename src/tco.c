@@ -503,20 +503,17 @@ static bool tco_png_reader_read(png_reader_t png, const char * fileName) {
 }
 
 static bool tco_label_window_initialize_from_png(tco_label_window_t label_window,
-                                                 png_reader_t png,
-                                                 int alpha);
+                                                 png_reader_t png);
 
 static bool tco_label_load_image(tco_context_t context,
-                                 tco_label_t label,
-                                 int alpha) {
+                                 tco_label_t label) {
     bool result = true;
     if(label->m_image_file!=NULL && label->m_image_file[0]!='\0') {
         png_reader_t png = tco_png_reader_alloc(context);
         if(png) {
             if(tco_png_reader_read(png, label->m_image_file)) {
                 result = tco_label_window_initialize_from_png(label->m_label_window,
-                                                              png,
-                                                              alpha);
+                                                              png);
             } else {
                 result = false;
             }
@@ -737,6 +734,18 @@ static bool tco_window_set_visible(tco_window_t window,
     return true;
 }
 
+static bool tco_window_set_alpha(tco_window_t window,
+                                 int alpha) {
+    int rc = screen_set_window_property_iv(window->m_window,
+                                           SCREEN_PROPERTY_GLOBAL_ALPHA,
+                                           &alpha);
+    if (rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+    return true;
+}
+
 static bool tco_window_post(tco_window_t window,
                             screen_buffer_t buffer) {
     if(!window) {
@@ -876,16 +885,19 @@ static bool tco_label_window_show_at(tco_label_window_t window,
         return false;
     }
 
-    tco_label_window_move(window, x, y);
+    if(!tco_label_window_move(window, x, y)) {
+        return false;
+    }
 
-    tco_window_set_visible(&window->m_baseWindow, true);
+    if(!tco_window_set_visible(&window->m_baseWindow, true)) {
+        return false;
+    }
 
     return true;
 }
 
 static bool tco_label_window_initialize_from_png(tco_label_window_t label_window,
-                                                 png_reader_t png,
-                                                 int alpha) {
+                                                 png_reader_t png) {
     if(!label_window) {
         return false;
     }
@@ -932,7 +944,7 @@ static bool tco_label_window_initialize_from_png(tco_label_window_t label_window
             SCREEN_BLIT_DESTINATION_WIDTH, label_window->m_baseWindow.m_size[0],
             SCREEN_BLIT_DESTINATION_HEIGHT, label_window->m_baseWindow.m_size[1],
             SCREEN_BLIT_TRANSPARENCY, SCREEN_TRANSPARENCY_SOURCE,
-            SCREEN_BLIT_GLOBAL_ALPHA, (alpha == -1 ? label_window->m_baseWindow.m_alpha : alpha),
+            //SCREEN_BLIT_GLOBAL_ALPHA, label_window->m_baseWindow.m_alpha,
             SCREEN_BLIT_SCALE_QUALITY, SCREEN_QUALITY_NICEST,
             SCREEN_BLIT_END
     };
@@ -947,6 +959,23 @@ static bool tco_label_window_initialize_from_png(tco_label_window_t label_window
 
     if(!tco_window_post(&label_window->m_baseWindow, buffer)) {
         return false;
+    }
+    return true;
+}
+
+static bool tco_set_controls_alpha(tco_context_t context, int alpha) {
+    int i;
+    for(i = 0; i < context->m_numControls; ++i) {
+        tco_control_t control = context->m_controls[i];
+        tco_label_t label = control->m_label;
+        if(label != NULL) {
+            tco_label_window_t label_window = label->m_label_window;
+            tco_window_t w = &label_window->m_baseWindow;
+            int a = (alpha == -1 ? label_window->m_baseWindow.m_alpha : alpha);
+            if(!tco_window_set_alpha(w, a)) {
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -1020,13 +1049,9 @@ static bool tco_configuration_window_draw(tco_configuration_window_t window,
         return false;
     }
 
-    int i = 0;
-    for(; i < window->m_background.m_context->m_numControls; ++i) {
-        if(!tco_label_load_image(window->m_background.m_context,
-                                 window->m_background.m_context->m_controls[i]->m_label,
-                                 (show ? 0xff : -1))) {
-            return false;
-        }
+    if(!tco_set_controls_alpha(window->m_background.m_context,
+                               (show ? 255 : -1))) {
+        return false;
     }
     return true;
 }
@@ -1236,7 +1261,7 @@ static tco_label_t tco_label_alloc(tco_context_t context,
                                                    alpha);
     if(image) {
         label->m_image_file = strdup(image);
-        tco_label_load_image(context, label, -1); /* use image alpha */
+        tco_label_load_image(context, label);
     }
     return label;
 }
@@ -2112,6 +2137,9 @@ static int tco_context_draw(tco_context_t ctx,
         if(!tco_control_draw_label(ctx->m_controls[i], window)) {
             return TCO_FAILURE;
         }
+    }
+    if(!tco_set_controls_alpha(ctx, -1)) {
+        return TCO_FAILURE;
     }
     return TCO_SUCCESS;
 }
