@@ -780,7 +780,8 @@ static tco_label_window_t tco_label_window_alloc(tco_context_t context,
                                                  int height,
                                                  int alpha) {
     tco_label_window_t window = (tco_label_window_t)calloc(1, sizeof(struct tco_label_window));
-    if(!tco_window_init_ex(&window->m_baseWindow,
+    tco_window_t baseWindow = &window->m_baseWindow;
+    if(!tco_window_init_ex(baseWindow,
                            context,
                            width,
                            height,
@@ -789,13 +790,13 @@ static tco_label_window_t tco_label_window_alloc(tco_context_t context,
         free(window);
         return NULL;
     }
-    if(!tco_window_set_z_order(&window->m_baseWindow, 6)) {
-        tco_window_done(&window->m_baseWindow);
+    if(!tco_window_set_z_order(baseWindow, 6)) {
+        tco_window_done(baseWindow);
         free(window);
         return NULL;
     }
-    if(!tco_window_set_touch_sensitivity(&window->m_baseWindow, 0)) {
-        tco_window_done(&window->m_baseWindow);
+    if(!tco_window_set_touch_sensitivity(baseWindow, 0)) {
+        tco_window_done(baseWindow);
         free(window);
         return NULL;
     }
@@ -839,7 +840,8 @@ static bool tco_label_window_show_at(tco_label_window_t window,
         return false;
     }
     int rc = 0;
-    if (parent && parent != window->m_baseWindow.m_parent) {
+    tco_window_t baseWindow = &window->m_baseWindow;
+    if (parent && parent != baseWindow->m_parent) {
         int parentBufferSize[2];
         int parentSize[2];
         rc = screen_get_window_property_iv(parent,
@@ -869,10 +871,10 @@ static bool tco_label_window_show_at(tco_label_window_t window,
         window->m_scale[0] = parentSize[0] / (float)parentBufferSize[0];
         window->m_scale[1] = parentSize[1] / (float)parentBufferSize[1];
 
-        int newSize[] = {window->m_baseWindow.m_size[0] * window->m_scale[0],
-                         window->m_baseWindow.m_size[1] * window->m_scale[1]};
+        int newSize[] = {baseWindow->m_size[0] * window->m_scale[0],
+                         baseWindow->m_size[1] * window->m_scale[1]};
 
-        rc = screen_set_window_property_iv(window->m_baseWindow.m_window,
+        rc = screen_set_window_property_iv(baseWindow->m_window,
                                            SCREEN_PROPERTY_SIZE,
                                            newSize);
         if(rc) {
@@ -881,7 +883,7 @@ static bool tco_label_window_show_at(tco_label_window_t window,
         }
     }
 
-    if (!tco_window_set_parent(&window->m_baseWindow, parent)) {
+    if (!tco_window_set_parent(baseWindow, parent)) {
         return false;
     }
 
@@ -889,7 +891,7 @@ static bool tco_label_window_show_at(tco_label_window_t window,
         return false;
     }
 
-    if(!tco_window_set_visible(&window->m_baseWindow, true)) {
+    if(!tco_window_set_visible(baseWindow, true)) {
         return false;
     }
 
@@ -905,7 +907,8 @@ static bool tco_label_window_initialize_from_png(tco_label_window_t label_window
     screen_buffer_t buffer;
     unsigned char *pixels;
     int stride;
-    if (!tco_window_get_pixels(&label_window->m_baseWindow,
+    tco_window_t window = &label_window->m_baseWindow;
+    if (!tco_window_get_pixels(window,
                                &buffer,
                                &pixels,
                                &stride)) {
@@ -926,7 +929,7 @@ static bool tco_label_window_initialize_from_png(tco_label_window_t label_window
         SCREEN_BLIT_COLOR, 0x0,
         SCREEN_BLIT_END
     };
-    rc = screen_fill(label_window->m_baseWindow.m_context->m_screenContext,
+    rc = screen_fill(window->m_context->m_screenContext,
                      buffer,
                      fill_attribs);
     if(rc != 0) {
@@ -941,14 +944,13 @@ static bool tco_label_window_initialize_from_png(tco_label_window_t label_window
             SCREEN_BLIT_SOURCE_HEIGHT, png->m_height,
             SCREEN_BLIT_DESTINATION_X, 0,
             SCREEN_BLIT_DESTINATION_Y, 0,
-            SCREEN_BLIT_DESTINATION_WIDTH, label_window->m_baseWindow.m_size[0],
-            SCREEN_BLIT_DESTINATION_HEIGHT, label_window->m_baseWindow.m_size[1],
+            SCREEN_BLIT_DESTINATION_WIDTH, window->m_size[0],
+            SCREEN_BLIT_DESTINATION_HEIGHT, window->m_size[1],
             SCREEN_BLIT_TRANSPARENCY, SCREEN_TRANSPARENCY_SOURCE,
-            //SCREEN_BLIT_GLOBAL_ALPHA, label_window->m_baseWindow.m_alpha,
             SCREEN_BLIT_SCALE_QUALITY, SCREEN_QUALITY_NICEST,
             SCREEN_BLIT_END
     };
-    rc = screen_blit(label_window->m_baseWindow.m_context->m_screenContext,
+    rc = screen_blit(window->m_context->m_screenContext,
                      buffer,
                      pixmapBuffer,
                      blit_attribs);
@@ -957,7 +959,7 @@ static bool tco_label_window_initialize_from_png(tco_label_window_t label_window
         return false;
     }
 
-    if(!tco_window_post(&label_window->m_baseWindow, buffer)) {
+    if(!tco_window_post(window, buffer)) {
         return false;
     }
     return true;
@@ -967,13 +969,15 @@ static bool tco_set_controls_alpha(tco_context_t context, int alpha) {
     int i;
     for(i = 0; i < context->m_numControls; ++i) {
         tco_control_t control = context->m_controls[i];
-        tco_label_t label = control->m_label;
-        if(label != NULL) {
-            tco_label_window_t label_window = label->m_label_window;
-            tco_window_t w = &label_window->m_baseWindow;
-            int a = (alpha == -1 ? label_window->m_baseWindow.m_alpha : alpha);
-            if(!tco_window_set_alpha(w, a)) {
-                return false;
+        if(control != NULL) {
+            tco_label_t label = control->m_label;
+            if(label != NULL) {
+                tco_label_window_t label_window = label->m_label_window;
+                tco_window_t w = &label_window->m_baseWindow;
+                int a = (alpha == -1 ? w->m_alpha : alpha);
+                if(!tco_window_set_alpha(w, a)) {
+                    return false;
+                }
             }
         }
     }
