@@ -15,8 +15,10 @@
 /* Maximum number of defined controls */
 #define MAX_TCO_CONTROLS 8
 
+#define __THISFILE__ "tco.c"
+
 /* Logging */
-#define DEBUGLOG(message, ...) fprintf(stderr, "%s(%s@%d): " message "\n", __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__);
+#define DEBUGLOG(message, ...) fprintf(stderr, "%s(%s@%d): " message "\n", __THISFILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__);
 
 /* Callback types */
 typedef int (*HandleKeyFunc)(int sym, int mod, int scancode, unsigned short unicode, int event);
@@ -476,8 +478,10 @@ static bool tco_png_reader_read(png_reader_t png, const char * fileName) {
             break;
         }
 
+        /* clear the pixel buffer */
         memset(realPixels, 0, realStride * png->m_height * sizeof(unsigned char));
 
+        /* copy PNG data to pixel buffer */
         unsigned char * buffer_pixel_row = realPixels;
         unsigned char * png_pixel_row = png->m_data;
         for(i = 0; i < png->m_height; ++i) {
@@ -596,6 +600,18 @@ static bool tco_window_get_pixels(tco_window_t window,
     return true;
 }
 
+static bool tco_window_set_alpha(tco_window_t window,
+                                 int alpha) {
+    int rc = screen_set_window_property_iv(window->m_window,
+                                           SCREEN_PROPERTY_GLOBAL_ALPHA,
+                                           &alpha);
+    if (rc) {
+        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
+        return false;
+    }
+    return true;
+}
+
 static bool tco_window_init_ex(tco_window_t window,
                                tco_context_t context,
                                int width,
@@ -663,8 +679,11 @@ static bool tco_window_init_ex(tco_window_t window,
         return false;
     }
 
-    if (!tco_window_set_parent(window, parent))
-    {
+    if(!tco_window_set_alpha(window, alpha)) {
+        return false;
+    }
+
+    if (!tco_window_set_parent(window, parent)) {
         return false;
     }
 
@@ -727,18 +746,6 @@ static bool tco_window_set_visible(tco_window_t window,
     int rc = screen_set_window_property_iv(window->m_window,
                                            SCREEN_PROPERTY_VISIBLE,
                                            &is_visible);
-    if (rc) {
-        DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
-        return false;
-    }
-    return true;
-}
-
-static bool tco_window_set_alpha(tco_window_t window,
-                                 int alpha) {
-    int rc = screen_set_window_property_iv(window->m_window,
-                                           SCREEN_PROPERTY_GLOBAL_ALPHA,
-                                           &alpha);
     if (rc) {
         DEBUGLOG("screen: %s (%d)", strerror(errno), errno);
         return false;
@@ -2136,8 +2143,7 @@ static int tco_context_draw(tco_context_t ctx,
         return TCO_FAILURE;
     }
     int i;
-    for (i = 0; i < ctx->m_numControls; ++i)
-    {
+    for (i = 0; i < ctx->m_numControls; ++i) {
         if(!tco_control_draw_label(ctx->m_controls[i], window)) {
             return TCO_FAILURE;
         }
