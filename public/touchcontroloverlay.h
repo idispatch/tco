@@ -102,7 +102,7 @@ int tco_handle_events(tco_context_t context,
 /**
  * Show overlay labels
  */
-int tco_drawlabels(tco_context_t context, screen_window_t window);
+int tco_draw(tco_context_t context, screen_window_t window);
 
 /**
  * Cleanup and shutdown

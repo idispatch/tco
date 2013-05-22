@@ -1704,7 +1704,7 @@ static int tco_context_load_controls(tco_context_t ctx,
         root = cJSON_Parse(json_text);
         if (!root)
         {
-	        DEBUGLOG("Could not parse JSON from string");
+            DEBUGLOG("Could not parse JSON from string");
             break;
         }
 
