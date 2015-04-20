@@ -7,11 +7,25 @@ QCONFIG=qconfig.mk
 endif
 include $(QCONFIG)
 
+#===== USEFILE - the file containing the usage message for the application.
 USEFILE=
+
+#===== NAME - name of the project (default - name of project directory).
 NAME=tco
-EXTRA_INCVPATH += $(PROJECT_ROOT)/public $(PROJECT_ROOT)/../cJSON
-EXTRA_SRCVPATH += $(PROJECT_ROOT)/src
-CCFLAGS += -D__BLACKBERRY__
+
+#===== EXTRA_INCVPATH - a space-separated list of directories to search for include files.
+EXTRA_INCVPATH+= \
+	$(PROJECT_ROOT)/public  \
+	$(PROJECT_ROOT)/../cJSON
+
+#===== EXTRA_SRCVPATH - a space-separated list of directories to search for source files.
+EXTRA_SRCVPATH+=$(PROJECT_ROOT)/src
+
+#===== CCFLAGS - add the flags to the C compiler command line.
+CCFLAGS+=-D__BLACKBERRY__
+
+#===== EXTRA_SILENT_VARIANTS - variants that are not appended to the result binary name (like MyBin_g)
+EXTRA_SILENT_VARIANTS+=x86
 
 include $(MKFILES_ROOT)/qmacros.mk
 ifndef QNX_INTERNAL
@@ -20,5 +34,7 @@ endif
 include $(QNX_INTERNAL)
 
 include $(MKFILES_ROOT)/qtargets.mk
+
 OPTIMIZE_TYPE_g=none
 OPTIMIZE_TYPE=$(OPTIMIZE_TYPE_$(filter g, $(VARIANTS)))
+
