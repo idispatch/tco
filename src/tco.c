@@ -947,7 +947,7 @@ static bool tco_label_window_initialize_from_png(tco_label_window_t label_window
             SCREEN_BLIT_DESTINATION_WIDTH, window->m_size[0],
             SCREEN_BLIT_DESTINATION_HEIGHT, window->m_size[1],
             SCREEN_BLIT_TRANSPARENCY, SCREEN_TRANSPARENCY_SOURCE,
-            SCREEN_BLIT_SCALE_QUALITY, SCREEN_QUALITY_NICEST,
+            SCREEN_BLIT_SCALE_QUALITY, SCREEN_QUALITY_FASTEST,
             SCREEN_BLIT_END
     };
     rc = screen_blit(window->m_context->m_screenContext,
@@ -1919,6 +1919,7 @@ static int tco_context_save_controls(tco_context_t ctx,
     return TCO_SUCCESS;
 }
 
+
 static bool tco_context_touch_event(tco_context_t ctx,
                                     screen_event_t event) {
     if(!ctx) {
@@ -2121,6 +2122,8 @@ static int tco_context_handle_events(tco_context_t ctx,
                 case SCREEN_EVENT_MTOUCH_MOVE:
                 case SCREEN_EVENT_MTOUCH_RELEASE:
                     return tco_context_touch_event(ctx, screen_event) ? TCO_SUCCESS : TCO_UNHANDLED;
+                //case SCREEN_EVENT_POINTER:
+                //  return tco_context_pointer_event(ctx, screen_event) ? TCO_SUCCESS : TCO_UNHANDLED;
                 default:
                     break;
                 }
