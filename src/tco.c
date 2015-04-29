@@ -13,7 +13,7 @@
 #include <cJSON.h>
 
 /* Maximum number of defined controls */
-#define MAX_TCO_CONTROLS 8
+#define MAX_TCO_CONTROLS 16
 
 /* Logging */
 #define DEBUGLOG(message, ...) fprintf(stderr, "%s(%s@%d): " message "\n", __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__);
@@ -31,61 +31,61 @@ const static int JITTER_THRESHOLD = 10;
 
 /* Control types enumeration */
 typedef enum {
-    KEY, /* Used to provide keyboard input */
-    DPAD, /* Provides angle and magnitude from center (0 east, 90 north, 180 west, 270 south) */
-    TOUCHAREA, /* Used to provide relative mouse motion */
-    MOUSEBUTTON, /* Used to provide mouse button state */
-    TOUCHSCREEN /* Provides: mouse move, left click tap and right click tap-hold */
+    KEY,          /* Used to provide keyboard input */
+    DPAD,         /* Provides angle and magnitude from center (0 east, 90 north, 180 west, 270 south) */
+    TOUCHAREA,    /* Used to provide relative mouse motion */
+    MOUSEBUTTON,  /* Used to provide mouse button state */
+    TOUCHSCREEN   /* Provides: mouse move, left click tap and right click tap-hold */
 } tco_control_type;
 
 /* Forward declaration of pointer to structure */
-typedef struct tco_window * tco_window_t;
-typedef struct tco_label_window * tco_label_window_t;
+typedef struct tco_window *               tco_window_t;
+typedef struct tco_label_window *         tco_label_window_t;
 typedef struct tco_configuration_window * tco_configuration_window_t;
-typedef struct tco_label * tco_label_t;
-typedef struct tco_control * tco_control_t;
-typedef struct png_reader * png_reader_t;
-typedef struct touch_owner * touch_owner_t;
+typedef struct tco_label *                tco_label_t;
+typedef struct tco_control *              tco_control_t;
+typedef struct png_reader *               png_reader_t;
+typedef struct touch_owner *              touch_owner_t;
 
 struct touch_owner {
-    tco_control_t control;
-    int touch_id;
+    tco_control_t            control;
+    int                      touch_id;
     SLIST_ENTRY(touch_owner) link;
 };
 
 /* TCO window */
 struct tco_window {
-    tco_context_t m_context;
+    tco_context_t   m_context;
     screen_window_t m_window;
     screen_window_t m_parent;
-    int m_size[2]; /* width, height */
-    int m_alpha; /* 0..255 */
+    int             m_size[2]; /* width, height */
+    int             m_alpha; /* 0..255 */
 };
 
 /* TCO label window */
 struct tco_label_window {
     struct tco_window m_baseWindow;
-    int m_offset[2]; /* x, y */
-    float m_scale[2]; /* x, y */
+    int               m_offset[2]; /* x, y */
+    float             m_scale[2];  /* x, y */
 };
 
 /* TCO configuration window */
 struct tco_configuration_window {
     struct tco_window m_background;
     struct tco_window m_foreground;
-    tco_control_t m_selected;
-    int m_startPos[2];
-    int m_endPos[2];
+    tco_control_t     m_selected;
+    int               m_startPos[2];
+    int               m_endPos[2];
 };
 
 /* TCO label */
 struct tco_label {
-    int m_x;
-    int m_y;
-    int m_width;
-    int m_height;
-    char * m_image_file;
-    tco_control_t m_control;
+    int                m_x;
+    int                m_y;
+    int                m_width;
+    int                m_height;
+    char *             m_image_file;
+    tco_control_t      m_control;
     tco_label_window_t m_label_window;
 };
 
@@ -149,25 +149,24 @@ struct tco_control {
 
 /* TCO context */
 struct tco_context {
-    screen_context_t m_screenContext;
+    screen_context_t           m_screenContext;
     tco_configuration_window_t m_configWindow;
 
     /* Defined controls */
-    tco_control_t * m_controls;
-    int m_numControls;
+    tco_control_t *            m_controls;
+    int                        m_numControls;
 
     SLIST_HEAD(touch_owners, touch_owner) m_touch_owners;
 
     /* Where to save user control settings*/
     char * m_user_control_path;
 
-    /* Callbacks */
-    HandleKeyFunc m_handleKeyFunc;
-    HandleDPadFunc m_handleDPadFunc;
-    HandleTouchFunc m_handleTouchFunc;
-    HandleMouseButtonFunc m_handleMouseButtonFunc;
-    HandleTapFunc m_handleTapFunc;
-    HandleTouchScreenFunc m_handleTouchScreenFunc;
+    HandleKeyFunc           m_handleKeyFunc;
+    HandleDPadFunc          m_handleDPadFunc;
+    HandleTouchFunc         m_handleTouchFunc;
+    HandleMouseButtonFunc   m_handleMouseButtonFunc;
+    HandleTapFunc           m_handleTapFunc;
+    HandleTouchScreenFunc   m_handleTouchScreenFunc;
 };
 
 struct png_reader {
@@ -185,7 +184,8 @@ struct png_reader {
 };
 
 /* Utility functions */
-static char * tco_read_text_file(const char * fileName)
+static
+char * tco_read_text_file(const char * fileName)
 {
     if(!fileName || fileName[0] == 0) {
         DEBUGLOG("No file to read");
@@ -237,7 +237,8 @@ static char * tco_read_text_file(const char * fileName)
 }
 
 /* JSON functions */
-static int tco_json_get_int(cJSON * object, const char * name)
+static
+int tco_json_get_int(cJSON * object, const char * name)
 {
     cJSON * value = cJSON_GetObjectItem(object, name);
     if (value != NULL && value->type == cJSON_Number) {
@@ -248,7 +249,9 @@ static int tco_json_get_int(cJSON * object, const char * name)
     return 0;
 }
 
-static int tco_json_set_int(cJSON * object, const char * name, int value) {
+static
+int tco_json_set_int(cJSON * object, const char * name, int value)
+{
     cJSON * p = cJSON_CreateNumber(value);
     if(p) {
         cJSON_AddItemToObject(object, name, p);
@@ -259,7 +262,8 @@ static int tco_json_set_int(cJSON * object, const char * name, int value) {
     }
 }
 
-static const char * tco_json_get_str(cJSON * object, const char * name)
+static
+const char * tco_json_get_str(cJSON * object, const char * name)
 {
     cJSON * value = cJSON_GetObjectItem(object, name);
     if (value != NULL && value->type == cJSON_String) {
@@ -270,7 +274,9 @@ static const char * tco_json_get_str(cJSON * object, const char * name)
     return 0;
 }
 
-static int tco_json_set_str(cJSON * object, const char * name, const char * value) {
+static
+int tco_json_set_str(cJSON * object, const char * name, const char * value)
+{
     cJSON * p = cJSON_CreateString(value);
     if(p) {
         cJSON_AddItemToObject(object, name, p);
@@ -282,7 +288,9 @@ static int tco_json_set_str(cJSON * object, const char * name, const char * valu
 }
 
 /* PNG reader functions */
-static png_reader_t tco_png_reader_alloc(tco_context_t context) {
+static
+png_reader_t tco_png_reader_alloc(tco_context_t context)
+{
     png_reader_t png = (png_reader_t)calloc(1, sizeof(struct png_reader));
     if(png) {
         png->m_context = context;
@@ -290,7 +298,9 @@ static png_reader_t tco_png_reader_alloc(tco_context_t context) {
     return png;
 }
 
-static void tco_png_reader_free(png_reader_t png) {
+static
+void tco_png_reader_free(png_reader_t png)
+{
     if(png) {
         int rc;
         if (png->m_read) {
@@ -315,7 +325,9 @@ static void tco_png_reader_free(png_reader_t png) {
     }
 }
 
-static bool tco_png_reader_read(png_reader_t png, const char * fileName) {
+static
+bool tco_png_reader_read(png_reader_t png, const char * fileName)
+{
     if(!png || !fileName || fileName[0] == 0) {
         DEBUGLOG("No PNG file to read");
         return false;
@@ -502,11 +514,14 @@ static bool tco_png_reader_read(png_reader_t png, const char * fileName) {
     return result;
 }
 
-static bool tco_label_window_initialize_from_png(tco_label_window_t label_window,
-                                                 png_reader_t png);
+static
+bool tco_label_window_initialize_from_png(tco_label_window_t label_window,
+                                          png_reader_t png);
 
-static bool tco_label_load_image(tco_context_t context,
-                                 tco_label_t label) {
+static
+bool tco_label_load_image(tco_context_t context,
+                          tco_label_t label)
+{
     bool result = true;
     if(label->m_image_file!=NULL && label->m_image_file[0]!='\0') {
         png_reader_t png = tco_png_reader_alloc(context);
@@ -525,9 +540,10 @@ static bool tco_label_load_image(tco_context_t context,
     return result;
 }
 
-/* TCO window functions */
-static bool tco_window_set_parent(tco_window_t window,
-                                  screen_window_t parent) {
+static
+bool tco_window_set_parent(tco_window_t window,
+                           screen_window_t parent)
+{
     if(!window) {
         return false;
     }
@@ -563,10 +579,12 @@ static bool tco_window_set_parent(tco_window_t window,
     return true;
 }
 
-static bool tco_window_get_pixels(tco_window_t window,
-                                  screen_buffer_t *buffer,
-                                  unsigned char ** pixels,
-                                  int *stride) {
+static
+bool tco_window_get_pixels(tco_window_t window,
+                           screen_buffer_t *buffer,
+                           unsigned char ** pixels,
+                           int *stride)
+{
     screen_buffer_t buffers[2];
     int rc = screen_get_window_property_pv(window->m_window,
                                            SCREEN_PROPERTY_RENDER_BUFFERS,
@@ -596,12 +614,14 @@ static bool tco_window_get_pixels(tco_window_t window,
     return true;
 }
 
-static bool tco_window_init_ex(tco_window_t window,
-                               tco_context_t context,
-                               int width,
-                               int height,
-                               int alpha,
-                               screen_window_t parent) {
+static
+bool tco_window_init_ex(tco_window_t window,
+                        tco_context_t context,
+                        int width,
+                        int height,
+                        int alpha,
+                        screen_window_t parent)
+{
     if(!window) {
         return false;
     }
@@ -671,9 +691,11 @@ static bool tco_window_init_ex(tco_window_t window,
     return true;
 }
 
-static bool tco_window_init(tco_window_t window,
-                            tco_context_t context,
-                            screen_window_t parent) {
+static
+bool tco_window_init(tco_window_t window,
+                     tco_context_t context,
+                     screen_window_t parent)
+{
     int rc = screen_get_window_property_iv(parent,
                                            SCREEN_PROPERTY_BUFFER_SIZE,
                                            window->m_size);
@@ -690,8 +712,10 @@ static bool tco_window_init(tco_window_t window,
                              parent);
 }
 
-static bool tco_window_set_z_order(tco_window_t window,
-                                   int zOrder) {
+static
+bool tco_window_set_z_order(tco_window_t window,
+                            int zOrder)
+{
     if(!window) {
         return false;
     }
@@ -705,8 +729,10 @@ static bool tco_window_set_z_order(tco_window_t window,
     return true;
 }
 
-static bool tco_window_set_touch_sensitivity(tco_window_t window,
-                                             int sensitivity) {
+static
+bool tco_window_set_touch_sensitivity(tco_window_t window,
+                                      int sensitivity)
+{
     if(!window) {
         return false;
     }
@@ -721,8 +747,10 @@ static bool tco_window_set_touch_sensitivity(tco_window_t window,
     return true;
 }
 
-static bool tco_window_set_visible(tco_window_t window,
-                                   bool visible) {
+static
+bool tco_window_set_visible(tco_window_t window,
+                            bool visible)
+{
     int is_visible = visible ? 1 : 0;
     int rc = screen_set_window_property_iv(window->m_window,
                                            SCREEN_PROPERTY_VISIBLE,
@@ -734,8 +762,10 @@ static bool tco_window_set_visible(tco_window_t window,
     return true;
 }
 
-static bool tco_window_set_alpha(tco_window_t window,
-                                 int alpha) {
+static
+bool tco_window_set_alpha(tco_window_t window,
+                          int alpha)
+{
     int rc = screen_set_window_property_iv(window->m_window,
                                            SCREEN_PROPERTY_GLOBAL_ALPHA,
                                            &alpha);
@@ -746,8 +776,10 @@ static bool tco_window_set_alpha(tco_window_t window,
     return true;
 }
 
-static bool tco_window_post(tco_window_t window,
-                            screen_buffer_t buffer) {
+static
+bool tco_window_post(tco_window_t window,
+                     screen_buffer_t buffer)
+{
     if(!window) {
         return false;
     }
@@ -760,7 +792,9 @@ static bool tco_window_post(tco_window_t window,
     return true;
 }
 
-static void tco_window_done(tco_window_t window) {
+static
+void tco_window_done(tco_window_t window)
+{
     if(!window) {
         return;
     }
@@ -773,12 +807,12 @@ static void tco_window_done(tco_window_t window) {
     memset(window, 0, sizeof(struct tco_window));
 }
 
-
-/* TCO label window functions */
-static tco_label_window_t tco_label_window_alloc(tco_context_t context,
-                                                 int width,
-                                                 int height,
-                                                 int alpha) {
+static
+tco_label_window_t tco_label_window_alloc(tco_context_t context,
+                                          int width,
+                                          int height,
+                                          int alpha)
+{
     tco_label_window_t window = (tco_label_window_t)calloc(1, sizeof(struct tco_label_window));
     tco_window_t baseWindow = &window->m_baseWindow;
     if(!tco_window_init_ex(baseWindow,
@@ -807,16 +841,20 @@ static tco_label_window_t tco_label_window_alloc(tco_context_t context,
     return window;
 }
 
-static void tco_label_window_free(tco_label_window_t window) {
+static
+void tco_label_window_free(tco_label_window_t window)
+{
     if(window) {
         tco_window_done(&window->m_baseWindow);
         free(window);
     }
 }
 
-static bool tco_label_window_move(tco_label_window_t window,
-                                  int x,
-                                  int y) {
+static
+bool tco_label_window_move(tco_label_window_t window,
+                           int x,
+                           int y)
+{
     if(!window) {
         return false;
     }
@@ -832,10 +870,12 @@ static bool tco_label_window_move(tco_label_window_t window,
     return true;
 }
 
-static bool tco_label_window_show_at(tco_label_window_t window,
-                                     screen_window_t parent,
-                                     int x,
-                                     int y) {
+static
+bool tco_label_window_show_at(tco_label_window_t window,
+                              screen_window_t parent,
+                              int x,
+                              int y)
+{
     if(!window) {
         return false;
     }
@@ -898,8 +938,10 @@ static bool tco_label_window_show_at(tco_label_window_t window,
     return true;
 }
 
-static bool tco_label_window_initialize_from_png(tco_label_window_t label_window,
-                                                 png_reader_t png) {
+static
+bool tco_label_window_initialize_from_png(tco_label_window_t label_window,
+                                          png_reader_t png)
+{
     if(!label_window) {
         return false;
     }
@@ -965,7 +1007,9 @@ static bool tco_label_window_initialize_from_png(tco_label_window_t label_window
     return true;
 }
 
-static bool tco_set_controls_alpha(tco_context_t context, int alpha) {
+static
+bool tco_set_controls_alpha(tco_context_t context, int alpha)
+{
     int i;
     for(i = 0; i < context->m_numControls; ++i) {
         tco_control_t control = context->m_controls[i];
@@ -984,9 +1028,10 @@ static bool tco_set_controls_alpha(tco_context_t context, int alpha) {
     return true;
 }
 
-/* Configuration window functions */
-static bool tco_configuration_window_draw(tco_configuration_window_t window,
-                                          bool show) {
+static
+bool tco_configuration_window_draw(tco_configuration_window_t window,
+                                   bool show)
+{
     if(!window) {
         return false;
     }
@@ -1060,8 +1105,10 @@ static bool tco_configuration_window_draw(tco_configuration_window_t window,
     return true;
 }
 
-static tco_configuration_window_t tco_configuration_alloc(tco_context_t context,
-                                                          screen_window_t parent) {
+static
+tco_configuration_window_t tco_configuration_alloc(tco_context_t context,
+                                                   screen_window_t parent)
+{
     tco_configuration_window_t window = (tco_configuration_window_t)calloc(1, sizeof(struct tco_configuration_window));
     if(!tco_window_init(&window->m_background, context, parent)) {
         free(window);
@@ -1107,18 +1154,22 @@ static tco_configuration_window_t tco_configuration_alloc(tco_context_t context,
     return window;
 }
 
-static tco_control_t tco_context_control_at(tco_context_t ctx,
-                                            int x,
-                                            int y);
+static
+tco_control_t tco_context_control_at(tco_context_t ctx,
+                                     int x,
+                                     int y);
 
-static bool tco_control_move(tco_control_t control,
-                             int dx,
-                             int dy,
-                             int max_x,
-                             int max_y);
+static
+bool tco_control_move(tco_control_t control,
+                      int dx,
+                      int dy,
+                      int max_x,
+                      int max_y);
 
-static int tco_configuration_window_run(tco_configuration_window_t window,
-                                        screen_event_t screen_event) {
+static
+int tco_configuration_window_run(tco_configuration_window_t window,
+                                 screen_event_t screen_event)
+{
     int rc;
     int eventType;
     int touchId;
@@ -1235,7 +1286,9 @@ static int tco_configuration_window_run(tco_configuration_window_t window,
     return TCO_SUCCESS;
 }
 
-static void tco_configuration_window_free(tco_configuration_window_t window) {
+static
+void tco_configuration_window_free(tco_configuration_window_t window)
+{
     if (window) {
         tco_configuration_window_draw(window, false);
         tco_window_done(&window->m_foreground);
@@ -1245,14 +1298,16 @@ static void tco_configuration_window_free(tco_configuration_window_t window) {
 }
 
 /* Label functions */
-static tco_label_t tco_label_alloc(tco_context_t context,
-                                   tco_control_t control,
-                                   int x,
-                                   int y,
-                                   int width,
-                                   int height,
-                                   int alpha,
-                                   const char * image) {
+static
+tco_label_t tco_label_alloc(tco_context_t context,
+                            tco_control_t control,
+                            int x,
+                            int y,
+                            int width,
+                            int height,
+                            int alpha,
+                            const char * image)
+{
     tco_label_t label = (tco_label_t)calloc(1, sizeof(struct tco_label));
     label->m_control = control;
     label->m_x = x;
@@ -1270,7 +1325,9 @@ static tco_label_t tco_label_alloc(tco_context_t context,
     return label;
 }
 
-static void tco_label_free(tco_label_t label) {
+static
+void tco_label_free(tco_label_t label)
+{
     if(label) {
         label->m_control = NULL;
         tco_label_window_free(label->m_label_window);
@@ -1279,33 +1336,37 @@ static void tco_label_free(tco_label_t label) {
     }
 }
 
-static bool tco_label_draw(tco_label_t label,
-                           screen_window_t window,
-                           int x,
-                           int y) {
+static
+bool tco_label_draw(tco_label_t label,
+                    screen_window_t window,
+                    int x,
+                    int y)
+{
     return tco_label_window_show_at(label->m_label_window,
                                     window,
                                     label->m_x + x,
                                     label->m_y + y);
 }
 
-static bool tco_label_move(tco_label_t label,
-                           int x,
-                           int y) {
+static
+bool tco_label_move(tco_label_t label,
+                    int x,
+                    int y)
+{
     return tco_label_window_move(label->m_label_window,
                                  label->m_x + x,
                                  label->m_y + y);
 }
 
-
-/* Control functions */
-static tco_control_t tco_control_alloc(tco_context_t context,
-                                       int id,
-                                       const char * controlType,
-                                       int x,
-                                       int y,
-                                       int width,
-                                       int height) {
+static
+tco_control_t tco_control_alloc(tco_context_t context,
+                                int id,
+                                const char * controlType,
+                                int x,
+                                int y,
+                                int width,
+                                int height)
+{
     tco_control_t control = calloc(1, sizeof(struct tco_control));
     control->m_context = context;
     control->m_id = id;
@@ -1332,16 +1393,20 @@ static tco_control_t tco_control_alloc(tco_context_t context,
     return control;
 }
 
-static void tco_control_free(tco_control_t control) {
+static
+void tco_control_free(tco_control_t control)
+{
     tco_label_free(control->m_label);
     free(control);
 }
 
-static bool tco_control_move(tco_control_t control,
-                             int dx,
-                             int dy,
-                             int max_x,
-                             int max_y) {
+static
+bool tco_control_move(tco_control_t control,
+                      int dx,
+                      int dy,
+                      int max_x,
+                      int max_y)
+{
     if(!control) {
         return false;
     }
@@ -1361,8 +1426,10 @@ static bool tco_control_move(tco_control_t control,
     return tco_label_move(control->m_label, control->m_x, control->m_y);
 }
 
-static bool tco_control_draw_label(tco_control_t control,
-                                   screen_window_t window) {
+static
+bool tco_control_draw_label(tco_control_t control,
+                            screen_window_t window)
+{
     if(!control) {
         return false;
     }
@@ -1375,9 +1442,11 @@ static bool tco_control_draw_label(tco_control_t control,
     return true;
 }
 
-static bool tco_control_in_bounds(tco_control_t control,
-                                  int x,
-                                  int y) {
+static
+bool tco_control_point_inside(tco_control_t control,
+                              int x,
+                              int y)
+{
     if(!control) {
         return false;
     }
@@ -1387,13 +1456,15 @@ static bool tco_control_in_bounds(tco_control_t control,
             y <= control->m_y + control->m_height);
 }
 
-static bool tco_control_handle_touch(tco_control_t control,
-                                     tco_context_t context,
-                                     int type,
-                                     int touchId,
-                                     int x,
-                                     int y,
-                                     long long timestamp) {
+static
+bool tco_control_handle_touch(tco_control_t control,
+                              tco_context_t context,
+                              int type,
+                              int touchId,
+                              int x,
+                              int y,
+                              long long timestamp)
+{
     if(!control) {
         return false;
     }
@@ -1409,7 +1480,7 @@ static bool tco_control_handle_touch(tco_control_t control,
             return false;
         }
 
-        if (!tco_control_in_bounds(control, x, y)) {
+        if (!tco_control_point_inside(control, x, y)) {
             return false;
         }
 
@@ -1455,7 +1526,7 @@ static bool tco_control_handle_touch(tco_control_t control,
             break;
         }
     } else {
-        if (!tco_control_in_bounds(control, x, y)) {
+        if (!tco_control_point_inside(control, x, y)) {
             /* Act as if we received a key up */
             switch (control->m_type)
             {
@@ -1594,12 +1665,14 @@ static bool tco_control_handle_touch(tco_control_t control,
 }
 
 /* TCO context functions */
-static tco_control_t tco_context_control_at(tco_context_t ctx,
-                                            int x,
-                                            int y);
+static
+tco_control_t tco_context_control_at(tco_context_t ctx,
+                                     int x,
+                                     int y);
 
-static tco_context_t tco_context_alloc(screen_context_t screenContext,
-                                       struct tco_callbacks callbacks)
+static
+tco_context_t tco_context_alloc(screen_context_t screenContext,
+                                struct tco_callbacks callbacks)
 {
     int rc = bps_initialize();
     if(rc != BPS_SUCCESS) {
@@ -1624,7 +1697,9 @@ static tco_context_t tco_context_alloc(screen_context_t screenContext,
     return ctx;
 }
 
-static void tco_context_free(tco_context_t ctx) {
+static
+void tco_context_free(tco_context_t ctx)
+{
     if(!ctx) {
         return;
     }
@@ -1635,6 +1710,7 @@ static void tco_context_free(tco_context_t ctx) {
     {
         tco_control_free(ctx->m_controls[i]);
     }
+
     free(ctx->m_controls);
     ctx->m_controls = NULL;
     ctx->m_numControls = 0;
@@ -1652,13 +1728,15 @@ static void tco_context_free(tco_context_t ctx) {
     bps_shutdown();
 }
 
-static tco_control_t tco_context_create_control(tco_context_t ctx,
-                                                int id,
-                                                const char * controlType,
-                                                int x,
-                                                int y,
-                                                int width,
-                                                int height) {
+static
+tco_control_t tco_context_create_control(tco_context_t ctx,
+                                         int id,
+                                         const char * controlType,
+                                         int x,
+                                         int y,
+                                         int width,
+                                         int height)
+{
     if(ctx->m_numControls >= MAX_TCO_CONTROLS) {
         DEBUGLOG("Too many controls defined");
         return NULL;
@@ -1675,9 +1753,11 @@ static tco_control_t tco_context_create_control(tco_context_t ctx,
     return control;
 }
 
-static int tco_context_load_controls(tco_context_t ctx,
-                                     const char * default_fileName,
-                                     const char * user_fileName) {
+static
+int tco_context_load_controls(tco_context_t ctx,
+                              const char * default_fileName,
+                              const char * user_fileName)
+{
     if(!ctx) {
         return TCO_FAILURE;
     }
@@ -1789,7 +1869,8 @@ static int tco_context_load_controls(tco_context_t ctx,
                     break;
                 }
             }
-        } else
+        }
+        else
         {
             DEBUGLOG("Invalid file contents");
             break;
@@ -1814,8 +1895,10 @@ static int tco_context_load_controls(tco_context_t ctx,
     return retCode;
 }
 
-static int tco_context_save_controls(tco_context_t ctx,
-                                     const char * user_fileName) {
+static
+int tco_context_save_controls(tco_context_t ctx,
+                              const char * user_fileName)
+{
     if(!ctx) {
         return TCO_FAILURE;
     }
@@ -1919,9 +2002,10 @@ static int tco_context_save_controls(tco_context_t ctx,
     return TCO_SUCCESS;
 }
 
-
-static bool tco_context_touch_event(tco_context_t ctx,
-                                    screen_event_t event) {
+static
+bool tco_context_touch_event(tco_context_t ctx,
+                             screen_event_t event)
+{
     if(!ctx) {
         return false;
     }
@@ -2029,9 +2113,11 @@ static bool tco_context_touch_event(tco_context_t ctx,
     return handled;
 }
 
-static int tco_context_handle_events(tco_context_t ctx,
-                                     screen_window_t window,
-                                     bps_event_t * event) {
+static
+int tco_context_handle_events(tco_context_t ctx,
+                              screen_window_t window,
+                              bps_event_t * event)
+{
     if(!ctx) {
         return TCO_FAILURE;
     }
@@ -2133,8 +2219,10 @@ static int tco_context_handle_events(tco_context_t ctx,
     return TCO_UNHANDLED;
 }
 
-static int tco_context_draw(tco_context_t ctx,
-                            screen_window_t window) {
+static
+int tco_context_draw(tco_context_t ctx,
+                     screen_window_t window)
+{
     if(!ctx) {
         return TCO_FAILURE;
     }
@@ -2151,17 +2239,17 @@ static int tco_context_draw(tco_context_t ctx,
     return TCO_SUCCESS;
 }
 
-static tco_control_t tco_context_control_at(tco_context_t ctx,
-                                            int x,
-                                            int y) {
+static
+tco_control_t tco_context_control_at(tco_context_t ctx,
+                                     int x,
+                                     int y)
+{
     if(!ctx) {
         return NULL;
     }
     int i;
-    for (i = 0; i < ctx->m_numControls; ++i)
-    {
-        if (tco_control_in_bounds(ctx->m_controls[i], x, y))
-        {
+    for (i = 0; i < ctx->m_numControls; ++i) {
+        if (tco_control_point_inside(ctx->m_controls[i], x, y)) {
             return ctx->m_controls[i];
         }
     }
@@ -2171,14 +2259,16 @@ static tco_control_t tco_context_control_at(tco_context_t ctx,
 /* Public TCO API functions */
 int tco_initialize(tco_context_t *context,
                    screen_context_t screenContext,
-                   struct tco_callbacks callbacks) {
+                   struct tco_callbacks callbacks)
+{
     *context = tco_context_alloc(screenContext, callbacks);
     return *context ? TCO_SUCCESS : TCO_FAILURE;
 }
 
 int tco_loadcontrols(tco_context_t context,
                      const char* default_filename,
-                     const char* user_filename) {
+                     const char* user_filename)
+{
     tco_context_t c = (tco_context_t)context;
     return tco_context_load_controls(c,
                                      default_filename,
@@ -2186,7 +2276,8 @@ int tco_loadcontrols(tco_context_t context,
 }
 
 int tco_savecontrols(tco_context_t context,
-                     const char* user_filename) {
+                     const char* user_filename)
+{
     tco_context_t c = (tco_context_t)context;
     return tco_context_save_controls(c,
                                      user_filename);
@@ -2194,7 +2285,8 @@ int tco_savecontrols(tco_context_t context,
 
 int tco_handle_events(tco_context_t context,
                       screen_window_t window,
-                      bps_event_t * event) {
+                      bps_event_t * event)
+{
     if(!event) {
         return TCO_SUCCESS;
     }
@@ -2203,12 +2295,14 @@ int tco_handle_events(tco_context_t context,
 }
 
 int tco_draw(tco_context_t context,
-             screen_window_t window) {
+             screen_window_t window)
+{
     tco_context_t c = (tco_context_t)context;
     return tco_context_draw(c, window);
 }
 
-void tco_shutdown(tco_context_t context) {
+void tco_shutdown(tco_context_t context)
+{
     tco_context_t c = (tco_context_t)context;
     tco_context_free(c);
 }
