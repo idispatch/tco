@@ -400,13 +400,14 @@ bool tco_png_reader_read(png_reader_t png, const char * fileName)
         png_read_update_info(png->m_read, png->m_info);
 
         const int channels = 4;
+#if 0
         png_set_palette_to_rgb(png->m_read);
         png_set_tRNS_to_alpha(png->m_read);
         png_set_bgr(png->m_read);
         png_set_expand(png->m_read);
         png_set_strip_16(png->m_read);
         png_set_gray_to_rgb(png->m_read);
-
+#endif
         if (png_get_channels(png->m_read, png->m_info) < channels) {
             png_set_filler(png->m_read, 0xff, PNG_FILLER_AFTER);
         }
